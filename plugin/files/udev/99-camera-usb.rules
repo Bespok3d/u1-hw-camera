@@ -1,0 +1,2 @@
+SUBSYSTEM=="video4linux", DRIVERS=="uvcvideo", ATTR{index}=="0", ACTION=="add",    RUN+="/bin/sh -c 'sleep 2; /userdata/bespok3d/etc/init.d/s65camera-usb start %E{DEVNAME}'"
+SUBSYSTEM=="video4linux", DRIVERS=="uvcvideo", ATTR{index}=="0", ACTION=="remove", RUN+="/userdata/bespok3d/etc/init.d/s65camera-usb stop %E{DEVNAME}"

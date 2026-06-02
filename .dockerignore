@@ -1,0 +1,4 @@
+# The plugin image (toolchain/Dockerfile) is built with the repo root as context but only COPYs
+# from src/. Keep the build context to src/ alone so the rest of the repo is not uploaded to Docker.
+*
+!src

@@ -1,0 +1,5 @@
+# Build outputs, never committed.
+dist/
+toolchain/dist/
+plugin/files/bin/
+.DS_Store
