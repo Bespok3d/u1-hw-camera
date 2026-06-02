@@ -4,8 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"   # the C sources live in src/ at the repo root
 cd "$SCRIPT_DIR"
-LIB_DIR="$SCRIPT_DIR/lib"
-. "$LIB_DIR/docker-build.sh"
+. "$SCRIPT_DIR/lib/docker-build.sh"
 
 if ! command -v docker > /dev/null 2>&1; then
     echo "ERROR: docker not found"
@@ -14,7 +13,6 @@ fi
 
 echo "==> Building camera binaries (arm64 via Docker emulation)..."
 rm -rf dist
-docker_build_base
 # Context is the repo root so the Dockerfile's `COPY src/...` resolves; the .dockerignore there
 # keeps only src/ in the context. dist/ still lands under toolchain/ (cwd), where pack.sh reads it.
 docker_image bespok3d-camera-hw-accel "$SCRIPT_DIR/Dockerfile" "$REPO_DIR"

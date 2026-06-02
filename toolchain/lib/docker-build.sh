@@ -1,20 +1,14 @@
 #!/bin/sh
-# Docker helpers for the arm64 plugin build. Every image targets linux/arm64 (the U1 is a Rockchip
-# SoC); on a non-arm host this runs under QEMU emulation.
-# LIB_DIR (this directory) is supplied by the caller before sourcing; POSIX sh cannot reliably
-# locate a sourced file on its own (no BASH_SOURCE), so we depend on the caller, not on $0.
-: "${LIB_DIR:?docker-build.sh: set LIB_DIR to this lib directory before sourcing}"
+# Docker helpers for the arm64 plugin build. The image targets linux/arm64 (the U1 is a Rockchip
+# SoC); on a non-arm host this runs under QEMU emulation. When CI sets B3D_CACHE_ARGS it adds the
+# buildx layer-cache flags, so unchanged layers (apt + v4l2-mpp deps) restore instead of rebuilding;
+# unset locally, so a plain local build is unaffected.
 
-# Build the shared toolchain base image (gcc / make / cmake / git / pkg-config).
-docker_build_base() {
-    docker build --platform linux/arm64 -t bespok3d-build-base \
-        -f "$LIB_DIR/Dockerfile.base" "$LIB_DIR"
-}
-
-# Build an image from an explicit Dockerfile (arg 2) and build context (arg 3), so the context can
-# sit apart from the Dockerfile (here: repo root, because the C sources live in src/ at the root).
+# Build the plugin image from an explicit Dockerfile (arg 2) and build context (arg 3). --load
+# brings the result into the local image store so docker_extract can copy from it.
 docker_image() {
-    docker build --pull=false --platform linux/arm64 -t "$1" -f "$2" "$3"
+    # shellcheck disable=SC2086
+    docker buildx build --platform linux/arm64 --load $B3D_CACHE_ARGS -t "$1" -f "$2" "$3"
 }
 
 # Copy an image's output dir (default /out) into ./dist (relative to the caller's cwd).

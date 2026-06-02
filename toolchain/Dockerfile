@@ -1,6 +1,11 @@
-FROM bespok3d-build-base
+# Single stage on purpose: the whole toolchain (apt packages + the v4l2-mpp `make deps`) is one
+# cacheable layer chain pinned to the v4l2-mpp commit, so a GitHub Actions layer cache restores it
+# and only the `COPY src` + `make install` layers rebuild when our code changes. Targets
+# linux/arm64 (Rockchip U1); emulated under QEMU on an x86 runner.
+FROM --platform=linux/arm64 debian:bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential make cmake git pkg-config \
     ninja-build curl wget python3 ca-certificates libssl-dev libv4l-dev \
     && rm -rf /var/lib/apt/lists/*
 

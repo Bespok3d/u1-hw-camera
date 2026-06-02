@@ -32,11 +32,20 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # Exposes ACTIONS_CACHE_URL + ACTIONS_RUNTIME_TOKEN so buildx can read/write the GitHub
+      # Actions layer cache (the type=gha referenced by B3D_CACHE_ARGS below).
+      - uses: crazy-max/ghaction-github-runtime@v3
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Build arm64 camera binaries
+        # First run fills the cache (slow, full QEMU build); every run after restores the apt +
+        # v4l2-mpp deps layers and only recompiles src/. To go faster still, switch to a native
+        # arm64 runner (see the runs-on note above) and this caching becomes unnecessary.
+        env:
+          B3D_CACHE_ARGS: --cache-from type=gha --cache-to type=gha,mode=max
         run: sh toolchain/build.sh
 
       - name: Pack the .b3
