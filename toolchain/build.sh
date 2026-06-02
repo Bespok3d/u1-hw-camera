@@ -4,7 +4,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"   # the C sources live in src/ at the repo root
 cd "$SCRIPT_DIR"
-. "$SCRIPT_DIR/lib/docker-build.sh"
+LIB_DIR="$SCRIPT_DIR/lib"
+. "$LIB_DIR/docker-build.sh"
 
 if ! command -v docker > /dev/null 2>&1; then
     echo "ERROR: docker not found"
