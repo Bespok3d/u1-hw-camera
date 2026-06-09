@@ -61,3 +61,10 @@ arm64 runner, set `runs-on: ubuntu-24.04-arm` and delete the "Set up QEMU" step 
 `.github/workflows/release.yml`; nothing else changes.
 
 Signing is intentionally deferred during private testing; the `.b3` ships unsigned.
+## Maintainership
+
+These plugins are published and maintained by the Bespok3d org, and several of them repackage or
+build on upstream source material. If you own the source material a plugin is based on and would
+rather manage it yourself, you are welcome to contact the org to claim it back. The one condition is
+that it stays actively maintained: a claimed plugin left to rot will be reclaimed so users are never
+stranded on an abandoned package.
