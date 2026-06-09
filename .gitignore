@@ -3,3 +3,5 @@ dist/
 toolchain/dist/
 plugin/files/bin/
 .DS_Store
+__pycache__/
+*.pyc

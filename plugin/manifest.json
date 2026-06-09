@@ -1,14 +1,15 @@
 {
   "name": "camera-hw-accel",
   "title": "Camera HW Accel",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Tap into the SoC's video pipeline instead of CPU-encoding every frame. MJPEG over HTTP at /webcam, WebRTC at /webrtc; works on any browser, smooth 30fps even with two cameras attached.\n\nTo have these auto-registered as cameras in Fluidd and Mainsail (so you don't have to add them by hand under Settings \u2192 Cameras), also install b3d://bespok3d-org/webcam-builtin for the built-in MIPI camera and b3d://bespok3d-org/webcam-usb for the external USB camera.",
   "tagline": "HW-accelerated MJPEG and WebRTC streaming for MIPI & USB cameras.",
   "category": "camera",
   "channel": "lts",
   "printer_specific": true,
+  "changelog": "doc/CHANGELOG.md",
   "published_at": "2025-08-14",
-  "updated_at": "2026-04-22",
+  "updated_at": "2026-06-05",
   "source": "https://github.com/bespok3d-org/plugin-camera-hw-accel",
   "publisher": "PLACEHOLDER",
   "provides": [
@@ -58,6 +59,12 @@
       "$BESPOK3D/etc/init.d/autostart/s65camera-usb restart"
     ]
   },
+  "stop": [
+    "$BESPOK3D/etc/init.d/autostart/s65camera-hw stop",
+    "$BESPOK3D/etc/init.d/autostart/s65camera-usb stop",
+    "$BESPOK3D/etc/init.d/lmdctl restart",
+    "/etc/init.d/S61moonraker restart"
+  ],
   "endpoints": [
     {
       "label": "Camera 1",

@@ -6,6 +6,24 @@ BIN=$PLUGIN/bin
 CTRL_BIN=$BESPOK3D/usr/local/plugins/camera-controls/bin
 STATE_FILE=$PLUGIN/camera-state.json
 RUN=$BESPOK3D/run
+LMDCTL=$BESPOK3D/etc/init.d/lmdctl
+
+# SIGTERM crashes unisrv (std::terminate -> 210MB core, can wedge the display), so route lmd
+# teardown through the jinni-owned lmdctl (SIGKILL + wait-for-gone). Fall back to a direct SIGKILL
+# if lmdctl is not deployed yet (plugin updated before the jinni).
+lmd_stop() {
+    if [ -x "$LMDCTL" ]; then
+        "$LMDCTL" stop
+    else
+        killall -9 unisrv lmd rkaiq_3A_ 2>/dev/null
+    fi
+}
+
+lmd_verify_rearm() {
+    [ -x "$LMDCTL" ] || return 0
+    "$LMDCTL" rearm
+    "$LMDCTL" verify
+}
 
 CMD_FAKE_SERVICE="$BIN/fake-service"
 CMD_FAKE_SERVICE_ARGS="--retry 3"
@@ -24,7 +42,7 @@ start() {
     mkdir -p /userdata/.tmp_timelapse
     chown -R lava:lava /userdata/.tmp_timelapse
 
-    killall lmd rkaiq_3A_ 2>/dev/null; sleep 1; true
+    lmd_stop
 
     printf "Starting capture-mipi: "
     start-stop-daemon -S -b -q -m -p $RUN/capture-mipi-mpp.pid \
@@ -71,11 +89,15 @@ start() {
         start-stop-daemon -S -b -q -m -p $RUN/unisrv.pid -x /usr/bin/lmd
         echo "OK"
     )
+
+    lmd_verify_rearm
 }
 
 stop() {
-    for pair in "lmd:$RUN/unisrv.pid" \
-                "stream-http:$RUN/stream-mipi-http.pid" \
+    printf "Stopping lmd: "
+    lmd_stop
+    echo "OK"
+    for pair in "stream-http:$RUN/stream-mipi-http.pid" \
                 "stream-webrtc:$RUN/stream-mipi-webrtc.pid" \
                 "capture-mipi:$RUN/capture-mipi-mpp.pid"; do
         name="${pair%%:*}"

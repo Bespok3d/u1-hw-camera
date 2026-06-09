@@ -53,7 +53,7 @@ the `.b3`, publishes a `camera-hw-accel-v<version>` GitHub release with the `.b3
 commits the atom (with the release asset's API download URL) into `Bespok3d/main-index/atoms/`,
 which rebuilds the published `index.json`.
 
-**Required secret:** `MAIN_INDEX_TOKEN` — a fine-grained PAT with `contents:write` on
+**Required secret:** `MAIN_INDEX_TOKEN` - a fine-grained PAT with `contents:write` on
 `Bespok3d/main-index` (the per-repo `GITHUB_TOKEN` cannot write a sibling repo).
 
 **ARM64 build:** CI builds under QEMU emulation on a standard runner. To switch to a native
