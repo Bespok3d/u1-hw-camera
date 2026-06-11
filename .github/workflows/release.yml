@@ -87,7 +87,7 @@ jobs:
           # cannot write a sibling repo). Create it in the org and add it as this repo's secret.
           MAIN_INDEX_TOKEN: ${{ secrets.MAIN_INDEX_TOKEN }}
         run: |
-          git clone --depth 1 "https://x-access-token:${MAIN_INDEX_TOKEN}@github.com/Bespok3d/main-index.git" main-index
+          git clone "https://x-access-token:${MAIN_INDEX_TOKEN}@github.com/Bespok3d/main-index.git" main-index
           mkdir -p main-index/atoms
           cp dist/camera-hw-accel.atom.json main-index/atoms/camera-hw-accel.atom.json
           cd main-index
