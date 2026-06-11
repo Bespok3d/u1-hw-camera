@@ -43,10 +43,16 @@ stage_binaries() {
 }
 
 # LC_ALL=C forces a byte-order sort so the file list is identical regardless of locale.
+# A plugin's ADR-0036 Python-dep declaration lives at the plugin root (not under files/) but the
+# daemon reads it from the unpacked dir to provision the venv / system-site links, so it ships in the
+# .b3 and belongs in files[] alongside the files/ tree.
 build_files_array() {
-  find "$PLUGIN_DIR/files" -type f \
-    ! -path '*/__pycache__/*' ! -name '*.pyc' ! -name '.DS_Store' \
-    | LC_ALL=C sort | while read -r fpath; do
+  { find "$PLUGIN_DIR/files" -type f \
+      ! -path '*/__pycache__/*' ! -name '*.pyc' ! -name '.DS_Store'
+    for req in requirements.txt klipper_requirements.txt; do
+      [ -f "$PLUGIN_DIR/$req" ] && printf '%s\n' "$PLUGIN_DIR/$req"
+    done
+  } | LC_ALL=C sort | while read -r fpath; do
     relpath="${fpath#"$PLUGIN_DIR/"}"
     sha=$(file_sha256 "$fpath")
     mode=$(file_mode "$fpath")
@@ -71,6 +77,9 @@ rm -f "$output"
   cd "$PLUGIN_DIR"
   zip -qr "$output" files/
   if [ -d doc ]; then zip -qr "$output" doc/; fi
+  for req in requirements.txt klipper_requirements.txt; do
+    [ -f "$req" ] && zip -q "$output" "$req"
+  done
   cd "$tmp_dir"
   zip -q "$output" manifest.json
 )
