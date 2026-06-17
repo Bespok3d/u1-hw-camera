@@ -1,7 +1,7 @@
 {
   "name": "camera-hw-accel",
   "title": "Camera HW Accel",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Tap into the SoC's video pipeline instead of CPU-encoding every frame. MJPEG over HTTP at /webcam, WebRTC at /webrtc; works on any browser, smooth 30fps even with two cameras attached.\n\nTo have these auto-registered as cameras in Fluidd and Mainsail (so you don't have to add them by hand under Settings \u2192 Cameras), also install b3d://bespok3d-org/webcam-builtin for the built-in MIPI camera and b3d://bespok3d-org/webcam-usb for the external USB camera.",
   "tagline": "HW-accelerated MJPEG and WebRTC streaming for MIPI & USB cameras.",
   "category": "camera",
