@@ -1,0 +1,6 @@
+live/
+live.*.tar.gz
+# Pulled deps (Rockchip MPP, libdatachannel) are cloned into these dirs only inside the Docker
+# build, pinned per VENDORING.md; never commit their source into our tree.
+mpp/
+libdatachannel/

@@ -28,10 +28,13 @@ file_sha256() {
 file_mode() { stat -f "%OLp" "$1" 2>/dev/null || stat -c "%a" "$1" 2>/dev/null; }
 
 stage_binaries() {
+  # Start clean: BIN_DIR is a gitignored staging dir, so a renamed/removed binary (e.g. the old
+  # stream-http.py -> camera-stream.py) would otherwise linger from a previous pack and ship as cruft.
+  rm -rf "$BIN_DIR"
   mkdir -p "$BIN_DIR"
   missing=""
   for f in capture-v4l2-jpeg-mpp capture-v4l2-raw-mpp stream-webrtc stream-rtsp \
-           stream-http.py fake-service libv4l2-imposter.so; do
+           camera-stream.py fake-service libv4l2-imposter.so; do
     if [ -f "$TOOLCHAIN_DIST/$f" ]; then cp "$TOOLCHAIN_DIST/$f" "$BIN_DIR/"
     else missing="$missing $f"; fi
   done

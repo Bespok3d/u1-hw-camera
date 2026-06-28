@@ -23,14 +23,14 @@ docker_extract bespok3d-camera-hw-accel bespok3d-camera-hw-accel-tmp
 if [ -z "$(ls dist/html/ 2>/dev/null)" ]; then
     mkdir -p dist/html
     CONTAINER_ID=$(docker create --platform linux/arm64 bespok3d-camera-hw-accel)
-    docker cp "${CONTAINER_ID}:/dist/usr/share/stream-http/html/." ./dist/html/ 2>/dev/null || true
+    docker cp "${CONTAINER_ID}:/dist/usr/share/camera-stream/html/." ./dist/html/ 2>/dev/null || true
     docker rm "${CONTAINER_ID}" > /dev/null
 fi
 
 echo "==> Validating output..."
 MISSING=0
 for binary in capture-v4l2-raw-mpp capture-v4l2-jpeg-mpp stream-webrtc stream-rtsp \
-              stream-http.py control-v4l2.py \
+              camera-stream.py control-v4l2.py \
               fake-service libv4l2-imposter.so; do
     if [ ! -f "dist/${binary}" ]; then
         echo "  MISSING binary: ${binary}"
@@ -38,7 +38,7 @@ for binary in capture-v4l2-raw-mpp capture-v4l2-jpeg-mpp stream-webrtc stream-rt
     fi
 done
 if [ -z "$(ls dist/html/*.html 2>/dev/null)" ]; then
-    echo "  MISSING: dist/html/*.html (stream-http WebRTC UI)"
+    echo "  MISSING: dist/html/*.html (camera-stream WebRTC UI)"
     MISSING=1
 fi
 

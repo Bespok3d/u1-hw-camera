@@ -1,0 +1,361 @@
+#include <atomic>
+#include <cstring>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <vector>
+#include <getopt.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#include <BasicUsageEnvironment.hh>
+#include <liveMedia.hh>
+
+#include "h264_frames.h"
+#include "h264_stream.h"
+#include "log.h"
+
+using Buffer = std::vector<uint8_t>;
+using BufferPtr = std::shared_ptr<Buffer>;
+
+static int g_debug = 0;
+static h264_stream_t g_h264_stream = H264_STREAM_INIT;
+static std::set<class DynamicH264Stream *> g_streams;
+static std::recursive_mutex g_streams_lock;
+static std::atomic<int> g_watch_variable{1};
+static std::atomic<int> g_dropped_frames{0};
+static std::atomic<int> g_total_frames{0};
+
+class DynamicH264Stream : public FramedSource
+{
+public:
+  DynamicH264Stream(UsageEnvironment& env)
+    : FramedSource(env)
+    , isRunning(false)
+    , currentOffset(0)
+  {
+  }
+
+  virtual ~DynamicH264Stream()
+  {
+    std::unique_lock lk(g_streams_lock);
+    g_streams.erase(this);
+  }
+
+  void sendNewFrame(const BufferPtr &buf)
+  {
+    std::unique_lock lk(lock);
+
+    if (!isRunning.load(std::memory_order_acquire)) {
+      return;
+    }
+
+    if (currentBuffer) {
+        log_printf("Dropping frame, previous frame not sent yet\n");
+        g_dropped_frames++;
+        return;
+    }
+
+    setNewBuffer(buf);
+  }
+
+  void handleClosure()
+  {
+    {
+        std::unique_lock lk(g_streams_lock);
+        g_streams.erase(this);
+        isRunning.store(false, std::memory_order_release);
+    }
+    FramedSource::handleClosure();
+  }
+
+  void doGetNextFrame()
+  {
+    {
+        std::unique_lock lk(g_streams_lock);
+        if (!isRunning.load(std::memory_order_acquire)) {
+            g_streams.insert(this);
+            isRunning.store(true, std::memory_order_release);
+        }
+    }
+
+    std::unique_lock lk(lock);
+
+    if (!currentBuffer) {
+        return;
+    }
+
+    if (!isCurrentlyAwaitingData()) {
+        return;
+    }
+
+    size_t remaining = currentBuffer->size() - currentOffset;
+    fFrameSize = std::min<size_t>(fMaxSize, remaining);
+    fNumTruncatedBytes = remaining - fFrameSize;
+
+    memcpy(fTo, currentBuffer->data() + currentOffset, fFrameSize);
+
+    if (g_debug) {
+        log_printf("Sending frame at offset %u of size %u (truncated %u)\n", currentOffset, fFrameSize, fNumTruncatedBytes);
+    }
+    currentOffset += fFrameSize;
+
+    if (currentBuffer->size() == currentOffset) {
+        setNewBuffer(BufferPtr());
+    }
+
+    lk.unlock();
+    afterGetting(this);
+  }
+
+private:
+  void doStopGettingFrames()
+  {
+    {
+        std::unique_lock lk(g_streams_lock);
+        if (isRunning.load(std::memory_order_acquire)) {
+            g_streams.erase(this);
+            isRunning.store(false, std::memory_order_release);
+        }
+    }
+
+    std::unique_lock lk(lock);
+    setNewBuffer(BufferPtr());
+  }
+
+  void setNewBuffer(const BufferPtr &buf)
+  {
+    currentBuffer = buf;
+    currentOffset = 0;
+  }
+
+  std::atomic<bool> isRunning;
+  std::mutex lock;
+  BufferPtr currentBuffer;
+  unsigned currentOffset;
+};
+
+class H264LiveServerMediaSubsession : public OnDemandServerMediaSubsession {
+public:
+    static H264LiveServerMediaSubsession* createNew(UsageEnvironment& env, Boolean reuseFirstSource) {
+        return new H264LiveServerMediaSubsession(env, reuseFirstSource);
+    }
+
+protected:
+    H264LiveServerMediaSubsession(UsageEnvironment& env, Boolean reuseFirstSource)
+        : OnDemandServerMediaSubsession(env, reuseFirstSource) {}
+
+    virtual ~H264LiveServerMediaSubsession() {}
+
+    virtual FramedSource* createNewStreamSource(unsigned clientSessionId, unsigned& estBitrate) {
+        (void)clientSessionId;
+        estBitrate = 2000;
+        auto framedSource = new DynamicH264Stream(envir());
+        return H264VideoStreamFramer::createNew(envir(), framedSource);
+    }
+
+    virtual RTPSink* createNewRTPSink(Groupsock* rtpGroupsock, unsigned char rtpPayloadTypeIfDynamic, FramedSource* inputSource) {
+        (void)inputSource;
+        return H264VideoRTPSink::createNew(envir(), rtpGroupsock, rtpPayloadTypeIfDynamic);
+    }
+};
+
+static void store_frame(const uint8_t *data, size_t size) {
+    std::unique_lock lk(g_streams_lock);
+
+    if (g_streams.empty()) {
+        return;
+    }
+
+    g_total_frames++;
+
+    BufferPtr buf = std::make_shared<Buffer>(data, data + size);
+    for (auto *stream : g_streams) {
+        stream->sendNewFrame(buf);
+    }
+}
+
+static void h264_read_handler(void*, int) {
+    h264_stream_process(&g_h264_stream, store_frame);
+}
+
+static void h264_stream_open_or_close(BasicTaskScheduler0* scheduler, const char *h264_sock) {
+    std::unique_lock lk(g_streams_lock);
+
+    if (g_streams.size() > 0) {
+        if (h264_stream_open(&g_h264_stream, h264_sock)) {
+            scheduler->setBackgroundHandling(g_h264_stream.fd, SOCKET_READABLE, h264_read_handler, nullptr);
+            if (g_debug) {
+                log_errorf("H264 socket opened for streaming\n");
+            }
+        }
+    } else if (g_h264_stream.fd >= 0) {
+        scheduler->disableBackgroundHandling(g_h264_stream.fd);
+        h264_stream_close(&g_h264_stream);
+    }
+}
+
+static void rtsp_flush() {
+    std::unique_lock lk(g_streams_lock);
+
+    for (auto *stream : g_streams) {
+        stream->doGetNextFrame();
+    }
+}
+
+static void close_old_clients(size_t max_clients) {
+    std::unique_lock lk(g_streams_lock);
+
+    while (g_streams.size() > max_clients) {
+        DynamicH264Stream* stream = *g_streams.begin();
+        lk.unlock();
+        stream->handleClosure();
+        lk.lock();
+        log_errorf("Closed old client, current clients: %zu\n", g_streams.size());
+    }
+}
+
+static void signal_handler(int) {
+    g_watch_variable = 0;
+}
+
+static void print_usage(const char* prog) {
+    printf("Usage: %s [options]\n", prog);
+    printf("Options:\n");
+    printf("  --h264-sock <path>     H264 stream input socket\n");
+    printf("  --rtsp-port <port>     RTSP server port (default: 8554)\n");
+    printf("  --max-clients <n>      Max concurrent clients (default: 4)\n");
+    printf("  --debug                Enable debug output\n");
+    printf("  --help                 Show this help\n");
+}
+
+int main(int argc, char* argv[]) {
+    log_printf("stream-rtsp - built %s (%s)\n", __DATE__, __FILE__);
+
+    std::string h264_sock;
+    int rtsp_port = 8554;
+    int max_clients = 4;
+    int buffer_size = 300000;
+
+    enum {
+        OPT_H264_SOCK = 1,
+        OPT_RTSP_PORT,
+        OPT_MAX_CLIENTS,
+        OPT_BUFFER_SIZE,
+        OPT_DEBUG,
+        OPT_HELP,
+    };
+
+    static struct option long_options[] = {
+        {"h264-sock",    required_argument, 0, OPT_H264_SOCK},
+        {"rtsp-port",    required_argument, 0, OPT_RTSP_PORT},
+        {"max-clients",  required_argument, 0, OPT_MAX_CLIENTS},
+        {"buffer-size",  required_argument, 0, OPT_BUFFER_SIZE},
+        {"debug",        no_argument,       0, OPT_DEBUG},
+        {"help",         no_argument,       0, OPT_HELP},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "", long_options, nullptr)) != -1) {
+        switch (opt) {
+        case OPT_H264_SOCK:
+            h264_sock = optarg;
+            break;
+        case OPT_RTSP_PORT:
+            rtsp_port = std::atoi(optarg);
+            break;
+        case OPT_MAX_CLIENTS:
+            max_clients = std::atoi(optarg);
+            break;
+        case OPT_BUFFER_SIZE:
+            buffer_size = std::atoi(optarg);
+            break;
+        case OPT_DEBUG:
+            g_debug = 1;
+            break;
+        case OPT_HELP:
+            print_usage(argv[0]);
+            return 0;
+        default:
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
+    if (h264_sock.empty()) {
+        log_errorf("Error: --h264-sock is required\n");
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGPIPE, SIG_IGN);
+
+    log_printf("H264 socket: %s\n", h264_sock.c_str());
+    log_printf("RTSP port: %d\n", rtsp_port);
+    log_printf("Max clients: %d\n", max_clients);
+
+    BasicTaskScheduler0* scheduler = BasicTaskScheduler::createNew();
+    UsageEnvironment* env = BasicUsageEnvironment::createNew(*scheduler);
+
+    OutPacketBuffer::maxSize = buffer_size;
+
+    UserAuthenticationDatabase* authDB = nullptr;
+
+    unsigned reclamationSeconds = 5;
+    RTSPServer* rtspServer = RTSPServer::createNew(*env, rtsp_port, authDB, reclamationSeconds);
+    if (rtspServer == nullptr) {
+        *env << "Failed to create RTSP server: " << env->getResultMsg() << "\n";
+        return 1;
+    }
+
+    ServerMediaSession* sms = ServerMediaSession::createNew(*env, "stream", "H264 Live Stream", "H264 video stream");
+    sms->addSubsession(H264LiveServerMediaSubsession::createNew(*env, True));
+    rtspServer->addServerMediaSession(sms);
+
+    log_printf("RTSP server started\n");
+    log_printf("Access the stream at the following URL:\n");
+    log_printf("  rtsp://<IP_ADDRESS>:%d/stream\n", rtsp_port);
+
+    char* url = rtspServer->rtspURL(sms);
+    log_printf("RTSP URL: %s\n", url);
+    delete[] url;
+
+    struct timespec stats_time;
+    clock_gettime(CLOCK_MONOTONIC, &stats_time);
+
+    while (g_watch_variable) {
+        scheduler->SingleStep(0);
+        h264_stream_open_or_close(scheduler, h264_sock.c_str());
+        close_old_clients(max_clients);
+        rtsp_flush();
+
+        if (g_debug) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long elapsed_ns = (now.tv_sec - stats_time.tv_sec) * 1000000000L +
+                            (now.tv_nsec - stats_time.tv_nsec);
+            if (elapsed_ns >= 1000000000L) {
+                log_printf("Streams: %zu. Frames: %d. Dropped: %d\n",
+                    g_streams.size(),
+                    g_total_frames.load(),
+                    g_dropped_frames.load()
+                );
+                stats_time = now;
+            }
+        }
+    }
+
+    h264_stream_close(&g_h264_stream);
+    Medium::close(rtspServer);
+    env->reclaim();
+    delete scheduler;
+
+    log_printf("Shutting down...\n");
+    return 0;
+}

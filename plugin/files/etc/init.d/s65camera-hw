@@ -8,6 +8,18 @@ STATE_FILE=$PLUGIN/camera-state.json
 RUN=$BESPOK3D/run
 LMDCTL=$BESPOK3D/etc/init.d/lmdctl
 
+# User config rendered by the daemon (defaults here keep boot working before any reconfigure, and on
+# an older package without camera.conf). WebRTC defaults ON: the Fluidd/Mainsail webcam tile is
+# registered for the WebRTC stream, so off-by-default would blank it. Turn off only with MJPEG.
+WEBRTC_ENABLED=1
+CAMERA_RESOLUTION=1080p
+[ -f "$PLUGIN/camera.conf" ] && . "$PLUGIN/camera.conf"
+
+case "$CAMERA_RESOLUTION" in
+    720p) CAM_WIDTH=1280; CAM_HEIGHT=720 ;;
+    *)    CAM_WIDTH=1920; CAM_HEIGHT=1080 ;;
+esac
+
 # SIGTERM crashes unisrv (std::terminate -> 210MB core, can wedge the display), so route lmd
 # teardown through the jinni-owned lmdctl (SIGKILL + wait-for-gone). Fall back to a direct SIGKILL
 # if lmdctl is not deployed yet (plugin updated before the jinni).
@@ -28,7 +40,7 @@ lmd_verify_rearm() {
 CMD_FAKE_SERVICE="$BIN/fake-service"
 CMD_FAKE_SERVICE_ARGS="--retry 3"
 
-CMD_CAPTURE="$BIN/capture-v4l2-raw-mpp --device /dev/video11 --format nv12 --jpeg-quality 7 --jpeg-sock /tmp/capture-mipi-jpeg.sock --mjpeg-sock /tmp/capture-mipi-mjpeg.sock --h264-sock /tmp/capture-mipi-h264.sock --raw-frame-sock /tmp/capture-mipi-raw.sock --width 1920 --height 1080 --fps 30"
+CMD_CAPTURE="$BIN/capture-v4l2-raw-mpp --device /dev/video11 --format nv12 --jpeg-quality 7 --jpeg-sock /tmp/capture-mipi-jpeg.sock --mjpeg-sock /tmp/capture-mipi-mjpeg.sock --h264-sock /tmp/capture-mipi-h264.sock --raw-frame-sock /tmp/capture-mipi-raw.sock --width $CAM_WIDTH --height $CAM_HEIGHT --fps 30"
 
 CMD_WEBRTC="$BIN/stream-webrtc --h264-sock /tmp/capture-mipi-h264.sock --webrtc-sock /tmp/capture-mipi-webrtc.sock"
 
@@ -56,10 +68,14 @@ start() {
         echo "TIMEOUT (camera may not stream)"
     fi
 
-    printf "Starting stream-webrtc: "
-    start-stop-daemon -S -b -q -m -p $RUN/stream-mipi-webrtc.pid \
-        -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS $CMD_WEBRTC
-    echo "OK"
+    WEBRTC_SOCK_ARG=""
+    if [ "$WEBRTC_ENABLED" = "1" ]; then
+        printf "Starting stream-webrtc: "
+        start-stop-daemon -S -b -q -m -p $RUN/stream-mipi-webrtc.pid \
+            -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS $CMD_WEBRTC
+        echo "OK"
+        WEBRTC_SOCK_ARG="--webrtc-sock /tmp/capture-mipi-webrtc.sock"
+    fi
 
     CTRL_SOCK_ARG=""
     if [ -d $BESPOK3D/usr/local/plugins/camera-controls ]; then
@@ -72,14 +88,14 @@ start() {
         CTRL_SOCK_ARG="--control-sock /tmp/v4l2-control-mipi.sock"
     fi
 
-    printf "Starting stream-http: "
+    printf "Starting camera-stream: "
     start-stop-daemon -S -b -q -m -p $RUN/stream-mipi-http.pid \
         -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS \
-        /usr/bin/python3 $BIN/stream-http.py \
+        /usr/bin/python3 $BIN/camera-stream.py \
         --jpeg-sock /tmp/capture-mipi-jpeg.sock \
         --mjpeg-sock /tmp/capture-mipi-mjpeg.sock \
         --h264-sock /tmp/capture-mipi-h264.sock \
-        --webrtc-sock /tmp/capture-mipi-webrtc.sock \
+        $WEBRTC_SOCK_ARG \
         $CTRL_SOCK_ARG \
         --bind 127.0.0.1 --port 8080 \
         --html-dir $PLUGIN/html

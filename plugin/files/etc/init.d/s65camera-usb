@@ -8,6 +8,11 @@ RUN=$BESPOK3D/run
 DEVICE="${2:-/dev/video18}"
 DEV_ID="$(echo "$DEVICE" | sed 's|/dev/||')"
 
+# WebRTC defaults ON (see camera.conf, rendered by the daemon); the USB camera streams at its own
+# native resolution, so CAMERA_RESOLUTION does not apply here.
+WEBRTC_ENABLED=1
+[ -f "$PLUGIN/camera.conf" ] && . "$PLUGIN/camera.conf"
+
 CMD_FAKE_SERVICE="$BIN/fake-service"
 CMD_FAKE_SERVICE_ARGS="--retry 3"
 
@@ -35,10 +40,14 @@ start() {
         echo "TIMEOUT (camera may not stream)"
     fi
 
-    printf "Starting stream-webrtc-usb (%s): " "$DEV_ID"
-    start-stop-daemon -S -b -q -m -p $RUN/stream-${DEV_ID}-webrtc.pid \
-        -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS $CMD_WEBRTC
-    echo "OK"
+    WEBRTC_SOCK_ARG=""
+    if [ "$WEBRTC_ENABLED" = "1" ]; then
+        printf "Starting stream-webrtc-usb (%s): " "$DEV_ID"
+        start-stop-daemon -S -b -q -m -p $RUN/stream-${DEV_ID}-webrtc.pid \
+            -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS $CMD_WEBRTC
+        echo "OK"
+        WEBRTC_SOCK_ARG="--webrtc-sock /tmp/capture-${DEV_ID}-webrtc.sock"
+    fi
 
     CTRL_SOCK_ARG=""
     if [ -d $BESPOK3D/usr/local/plugins/camera-controls ]; then
@@ -50,14 +59,14 @@ start() {
         CTRL_SOCK_ARG="--control-sock /tmp/v4l2-control-${DEV_ID}.sock"
     fi
 
-    printf "Starting stream-http-usb (%s): " "$DEV_ID"
+    printf "Starting camera-stream-usb (%s): " "$DEV_ID"
     start-stop-daemon -S -b -q -m -p $RUN/stream-${DEV_ID}-http.pid \
         -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS \
-        /usr/bin/python3 $BIN/stream-http.py \
+        /usr/bin/python3 $BIN/camera-stream.py \
         --jpeg-sock /tmp/capture-${DEV_ID}-jpeg.sock \
         --mjpeg-sock /tmp/capture-${DEV_ID}-mjpeg.sock \
         --h264-sock /tmp/capture-${DEV_ID}-h264.sock \
-        --webrtc-sock /tmp/capture-${DEV_ID}-webrtc.sock \
+        $WEBRTC_SOCK_ARG \
         $CTRL_SOCK_ARG \
         --bind 127.0.0.1 --port 8081 \
         --html-dir $PLUGIN/html
