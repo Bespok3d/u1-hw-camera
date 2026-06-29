@@ -21,6 +21,7 @@
 
 #include "h264_frames.h"
 #include "h264_stream.h"
+#include "placeholder_h264.h"
 #include "log.h"
 
 using json = nlohmann::json;
@@ -32,6 +33,17 @@ static h264_stream_t g_h264_stream = H264_STREAM_INIT;
 static constexpr int PING_INTERVAL_MS = 1000;
 static constexpr int CONNECT_TIMEOUT_MS = 30000;
 static constexpr int PONG_TIMEOUT_MS = 30000;
+
+// Show the placeholder only after the feed has been silent this long, so a normal GOP-boundary or a
+// brief capture respawn gap does not flash the message; resend it on this cadence while the feed
+// stays down so a viewer that connects mid-stall still gets a fresh keyframe quickly.
+static constexpr int PLACEHOLDER_AFTER_MS = 5000;
+static constexpr int PLACEHOLDER_RESEND_MS = 1000;
+
+// On a deliberate close (recycle / pong timeout) we send the placeholder, then keep the connection up
+// this long so the keyframe actually reaches the browser before the transport is torn down; an
+// immediate close drops the queued frame and the tile freezes on its last live image instead.
+static constexpr int PLACEHOLDER_FLUSH_MS = 1000;
 
 struct Client {
     std::string id;
@@ -46,6 +58,8 @@ struct Client {
     std::vector<std::string> pending_candidates;
     bool answer_received = false;
     bool keepAlive = false;
+    bool closing = false;
+    std::chrono::steady_clock::time_point close_after;
 };
 
 static std::mutex g_clients_mutex;
@@ -59,6 +73,12 @@ static int g_max_clients = 4;
 // their own when it fires, so it is a brief blip, not a freeze. Dead clients are always reaped via
 // the keepalive pong timeout and the Failed/Closed cleanup regardless of this value.
 static int g_session_timeout_s = 0;
+
+// Feed-liveness + placeholder cadence, touched only on the poll-loop thread (send_frame runs from
+// h264_stream_process in the main loop, the placeholder check runs right after), so no lock is
+// needed for these two; the per-client send still takes g_clients_mutex.
+static std::chrono::steady_clock::time_point g_last_feed_frame;
+static std::chrono::steady_clock::time_point g_last_placeholder;
 
 static std::shared_ptr<Client> find_client(const std::string& id) {
     std::lock_guard<std::mutex> lock(g_clients_mutex);
@@ -80,27 +100,90 @@ static bool has_clients() {
     return false;
 }
 
-static void send_frame(const uint8_t *data, size_t size) {
+static void send_to_client(const std::shared_ptr<Client>& client,
+                           std::chrono::steady_clock::time_point now,
+                           const uint8_t *data, size_t size) {
+    if (!client->video_track || !client->video_track->isOpen()) {
+        return;
+    }
+
+    try {
+        auto elapsed = std::chrono::duration<double>(now - client->start_time).count();
+        client->sr_reporter->rtpConfig->timestamp =
+            client->sr_reporter->rtpConfig->startTimestamp +
+            client->sr_reporter->rtpConfig->secondsToTimestamp(elapsed);
+
+        rtc::binary frame(
+            reinterpret_cast<const std::byte*>(data),
+            reinterpret_cast<const std::byte*>(data + size));
+        client->video_track->send(frame);
+    } catch (...) {}
+}
+
+static void deliver_to_clients(const uint8_t *data, size_t size) {
     std::lock_guard<std::mutex> lock(g_clients_mutex);
     auto now = std::chrono::steady_clock::now();
-
     for (auto& client : g_clients) {
-        if (!client->video_track || !client->video_track->isOpen()) {
+        // A client being deliberately closed must see ONLY its placeholder, not more live frames that
+        // would overwrite the message before teardown.
+        if (client->closing) {
             continue;
         }
-
-        try {
-            auto elapsed = std::chrono::duration<double>(now - client->start_time).count();
-            client->sr_reporter->rtpConfig->timestamp =
-                client->sr_reporter->rtpConfig->startTimestamp +
-                client->sr_reporter->rtpConfig->secondsToTimestamp(elapsed);
-
-            rtc::binary frame(
-                reinterpret_cast<const std::byte*>(data),
-                reinterpret_cast<const std::byte*>(data + size));
-            client->video_track->send(frame);
-        } catch (...) {}
+        send_to_client(client, now, data, size);
     }
+}
+
+static void send_frame(const uint8_t *data, size_t size) {
+    g_last_feed_frame = std::chrono::steady_clock::now();
+    deliver_to_clients(data, size);
+}
+
+static void send_placeholder() {
+    deliver_to_clients(placeholder_h264, placeholder_h264_len);
+}
+
+// Called from ping_clients, which already holds g_clients_mutex, so it must not relock.
+static void send_placeholder_to(const std::shared_ptr<Client>& client) {
+    send_to_client(client, std::chrono::steady_clock::now(),
+                   placeholder_h264, placeholder_h264_len);
+}
+
+// While viewers are connected but the live feed has gone silent past the stall threshold, resend the
+// placeholder keyframe on a steady cadence so the tile carries the interrupted message (and a viewer
+// that connects mid-stall still gets a keyframe) instead of a frozen frame. send_frame stamps
+// g_last_feed_frame on every real frame, so this stops the moment the feed recovers.
+static void maybe_send_placeholder() {
+    if (!has_clients()) {
+        return;
+    }
+    auto now = std::chrono::steady_clock::now();
+    auto since_feed = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_last_feed_frame).count();
+    if (since_feed < PLACEHOLDER_AFTER_MS) {
+        return;
+    }
+    auto since_placeholder = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_last_placeholder).count();
+    if (since_placeholder < PLACEHOLDER_RESEND_MS) {
+        return;
+    }
+    g_last_placeholder = now;
+    send_placeholder();
+}
+
+// Begin a graceful, message-carrying close: show the placeholder and schedule the real teardown for
+// PLACEHOLDER_FLUSH_MS later. Until then the client is `closing`, so it gets no more live frames, only
+// the placeholder (resent below), and the keyframe has time to reach the browser before we close.
+static void begin_close(const std::shared_ptr<Client>& c, std::chrono::steady_clock::time_point now) {
+    c->closing = true;
+    c->close_after = now + std::chrono::milliseconds(PLACEHOLDER_FLUSH_MS);
+    send_placeholder_to(c);
+}
+
+static void advance_close(const std::shared_ptr<Client>& c, std::chrono::steady_clock::time_point now) {
+    if (now >= c->close_after) {
+        c->pc->close();
+        return;
+    }
+    send_placeholder_to(c);  // resend until teardown so a lost keyframe still lands first
 }
 
 static void cleanup_clients() {
@@ -131,12 +214,17 @@ static void ping_clients() {
     // dead client is always reaped via the connect timeout, the keepalive pong timeout, and the
     // Failed/Closed state cleanup, independent of that setting.
     for (auto& c : g_clients) {
+        if (c->closing) {
+            advance_close(c, now);
+            continue;
+        }
+
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - c->start_time).count();
 
         if (g_session_timeout_s > 0 && elapsed >= g_session_timeout_s) {
             log_errorf("Client %s session recycle (%ds, user-configured)\n",
                        c->id.c_str(), g_session_timeout_s);
-            c->pc->close();
+            begin_close(c, now);
             continue;
         }
 
@@ -152,7 +240,7 @@ static void ping_clients() {
         if (since_pong >= PONG_TIMEOUT_MS) {
             if (c->keepAlive) {
                 log_errorf("Client %s pong timeout\n", c->id.c_str());
-                c->pc->close();
+                begin_close(c, now);
                 continue;
             }
 
@@ -494,6 +582,9 @@ int main(int argc, char* argv[]) {
 
     log_printf("WebRTC server running...\n");
 
+    g_last_feed_frame = std::chrono::steady_clock::now();
+    g_last_placeholder = g_last_feed_frame;
+
     while (g_running) {
         struct pollfd pfd[] = {
             {listen_fd, POLLIN, 0},
@@ -519,6 +610,8 @@ int main(int argc, char* argv[]) {
         } else {
             h264_stream_close(&g_h264_stream);
         }
+
+        maybe_send_placeholder();
     }
 
     log_printf("Shutting down...\n");

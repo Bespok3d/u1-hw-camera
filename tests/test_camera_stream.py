@@ -1,3 +1,5 @@
+import itertools
+
 import camera_stream
 
 FRAME_A = b'\xff\xd8aaa\xff\xd9'
@@ -5,6 +7,7 @@ FRAME_B = b'\xff\xd8bbb\xff\xd9'
 
 TIMEOUT = 'timeout'
 EOF = 'eof'
+REFUSE = 'refuse'
 
 
 class Clock:
@@ -45,8 +48,8 @@ class FakeSocket:
 
 
 class ConnectFactory:
-    """Hands out the scripted sockets in order, one per (re)connect; raises once exhausted so a
-    further reconnect attempt looks like the capture socket being gone."""
+    """Hands out the scripted sockets in order, one per (re)connect. A REFUSE entry (or running out)
+    raises, standing in for the capture socket being briefly gone."""
 
     def __init__(self, sockets):
         self.sockets = list(sockets)
@@ -56,14 +59,19 @@ class ConnectFactory:
         self.calls += 1
         if not self.sockets:
             raise ConnectionRefusedError
-        return self.sockets.pop(0)
+        nxt = self.sockets.pop(0)
+        if nxt == REFUSE:
+            raise ConnectionRefusedError
+        return nxt
 
 
-def make_stream(connect, clock):
-    jump = camera_stream.RECOVER_WINDOW_S + 1
+def make_stream(connect, clock, stall_after_s=5.0, advance=3.0):
+    # Each reconnect's backoff sleep advances the injected clock by `advance` seconds, so a handful of
+    # frameless cycles deterministically crosses (advance < stall) or stays under (advance small) the
+    # stall threshold.
     return camera_stream.CaptureStream(
         '/capture.sock', connect=connect, monotonic=clock,
-        sleep=lambda _seconds: clock.advance(jump),
+        sleep=lambda _seconds: clock.advance(advance), stall_after_s=stall_after_s,
     )
 
 
@@ -134,39 +142,72 @@ def test_read_chunk_returns_data():
     assert camera_stream.read_chunk(FakeSocket([b'xyz'])) == b'xyz'
 
 
-# ── CaptureStream reconnect (the freeze fix) ───────────────────────────────────────────────────
+# ── first_jpeg (snapshot frame assembly) ───────────────────────────────────────────────────────
 
-def test_capture_stream_reconnects_across_a_stall():
+def test_first_jpeg_returns_first_complete_frame():
+    assert camera_stream.first_jpeg([b'\xff\xd8a', b'aa\xff\xd9 trailing']) == FRAME_A
+
+
+def test_first_jpeg_empty_when_chunks_lack_a_complete_frame():
+    assert camera_stream.first_jpeg([b'\xff\xd8parti', b'al']) == b''
+
+
+# ── load_placeholder (interrupted-stream image) ────────────────────────────────────────────────
+
+def test_load_placeholder_reads_committed_asset(tmp_path):
+    (tmp_path / camera_stream.PLACEHOLDER_FILENAME).write_bytes(FRAME_A)
+    assert camera_stream.load_placeholder(str(tmp_path)) == FRAME_A
+
+
+def test_load_placeholder_missing_returns_empty(tmp_path):
+    assert camera_stream.load_placeholder(str(tmp_path)) == b''
+
+
+# ── CaptureStream reconnect + placeholder (the freeze fix) ─────────────────────────────────────
+
+FRAME = camera_stream.CAPTURE_FRAME
+STALLED = (camera_stream.CAPTURE_STALLED, None)
+
+
+def test_capture_stream_reconnects_across_a_brief_stall_without_placeholder():
+    # a sub-threshold gap is absorbed by the silent reconnect: frames resume, no message flashes
     clock = Clock()
-    sockets = [FakeSocket([FRAME_A, TIMEOUT]), FakeSocket([FRAME_B, TIMEOUT]),
-               FakeSocket([TIMEOUT])]
+    sockets = [FakeSocket([FRAME_A, TIMEOUT]), FakeSocket([FRAME_B, TIMEOUT])]
     connect = ConnectFactory(sockets)
-    frames = list(make_stream(connect, clock).frames())
-    assert frames == [FRAME_A, FRAME_B]
-    assert connect.calls == 3
+    items = list(itertools.islice(make_stream(connect, clock, advance=0.5).frames(), 2))
+    assert items == [(FRAME, FRAME_A), (FRAME, FRAME_B)]
+    assert STALLED not in items
     assert sockets[0].closed
 
 
 def test_capture_stream_reconnects_when_capture_drops_us():
     # capture closing our client (EOF) is a stall, not the end of the viewer's stream
     clock = Clock()
-    connect = ConnectFactory([FakeSocket([FRAME_A, EOF]), FakeSocket([FRAME_B, TIMEOUT]),
-                              FakeSocket([TIMEOUT])])
-    assert list(make_stream(connect, clock).frames()) == [FRAME_A, FRAME_B]
+    connect = ConnectFactory([FakeSocket([FRAME_A, EOF]), FakeSocket([FRAME_B, TIMEOUT])])
+    items = list(itertools.islice(make_stream(connect, clock, advance=0.5).frames(), 2))
+    assert items == [(FRAME, FRAME_A), (FRAME, FRAME_B)]
 
 
-def test_capture_stream_gives_up_after_recover_window():
+def test_capture_stream_emits_placeholder_after_a_prolonged_stall():
+    # capture down past the stall threshold -> the response stays open and signals a placeholder,
+    # repeatedly, instead of ending (the old giveup that froze the tile)
     clock = Clock()
-    connect = ConnectFactory([FakeSocket([TIMEOUT]), FakeSocket([TIMEOUT])])
-    assert list(make_stream(connect, clock).frames()) == []
+    connect = ConnectFactory([FakeSocket([FRAME_A, TIMEOUT])])  # one frame, then refusals
+    items = list(itertools.islice(make_stream(connect, clock, advance=3.0).frames(), 3))
+    assert items[0] == (FRAME, FRAME_A)
+    assert STALLED in items[1:]
 
 
-def test_capture_stream_survives_a_failed_reconnect():
-    # a refused reconnect (capture socket briefly gone) is just another stall, recovered from later
+def test_capture_stream_resumes_real_frames_after_a_placeholder():
+    # a stall shows the placeholder, then a recovered capture delivers live frames again, all within
+    # the one never-ending response
     clock = Clock()
-    connect = ConnectFactory([FakeSocket([FRAME_A, TIMEOUT])])  # only one socket, then refusals
-    frames = list(make_stream(connect, clock).frames())
-    assert frames == [FRAME_A]
+    connect = ConnectFactory([FakeSocket([FRAME_A, TIMEOUT]), REFUSE, REFUSE,
+                              FakeSocket([FRAME_B, TIMEOUT])])
+    items = list(itertools.islice(make_stream(connect, clock, advance=3.0).frames(), 4))
+    assert items[0] == (FRAME, FRAME_A)
+    assert STALLED in items
+    assert (FRAME, FRAME_B) in items
 
 
 # ── MjpegPacer (per-connection send state) ─────────────────────────────────────────────────────

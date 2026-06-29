@@ -48,6 +48,24 @@ Open the plugin's **Config** tab to adjust these:
   resolution.
 - **Recycle WebRTC viewers after (minutes)** (default 0 = off): see "Staying connected" below.
 
+## When a stream is interrupted
+
+If a camera you are watching stops, the tile shows a clear **"Stream interrupted"** message in place
+of the last frame, instead of silently freezing on a stale image. It covers the WebRTC and MJPEG
+streams and the snapshot, with no browser changes, and a brief sub-second hiccup is absorbed silently
+so the message never flashes.
+
+What happens next depends on why it stopped:
+
+- **The camera itself stalled or restarted** (the common case): the message clears and live video
+  resumes on its own the moment the camera is back. You do not need to do anything.
+- **The connection dropped but the camera is healthy** (for example a recycled WebRTC viewer on a
+  Fluidd tile, which does not auto-reconnect): the message stays up, and you **refresh the page** to
+  restart the stream, as the message suggests.
+
+This is server-side, so it works the same in any browser. The bundled raw-H264 player (`/stream.h264`)
+and RTSP output are not covered.
+
 ## Staying connected
 
 The streaming server no longer drops a healthy WebRTC connection on a timer, so the camera stays up

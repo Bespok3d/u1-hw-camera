@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.6
+
+- When a camera you are watching stops, the tile now shows a clear "Stream
+  interrupted" message instead of freezing on its last frame. It covers the WebRTC
+  and MJPEG streams and the snapshot, with no browser changes. If the camera just
+  stalled or restarted, live video comes back on its own the moment it recovers; if
+  the WebRTC connection was recycled or dropped, the message is shown to the viewer
+  before the connection closes, and a refresh restores it (a Fluidd tile needs that
+  refresh; Mainsail and the built-in player reconnect on their own). A normal
+  sub-second hiccup is absorbed silently, so the message never flashes.
+
 ## 0.1.5
 
 - The WebRTC camera view no longer freezes after a while. The streaming server

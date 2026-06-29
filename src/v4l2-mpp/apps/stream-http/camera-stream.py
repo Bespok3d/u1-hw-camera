@@ -25,11 +25,15 @@ MJPEG_SEND_TIMEOUT_MS = 10000
 # A long-lived MJPEG response must survive a capture-side hiccup: the capture binary can briefly
 # stop feeding our one connection (or drop it after its own slow-client timeout), and a plain
 # `<img>` stream does not reconnect, so the viewer freezes until a manual refresh. We give the
-# capture-socket read a timeout and, on a stall, reconnect internally and keep streaming to the
-# client, only giving up after RECOVER_WINDOW_S with no recovered frame.
+# capture-socket read a timeout and, on a stall, reconnect internally and keep streaming. A stall
+# longer than STALL_PLACEHOLDER_S surfaces a "stream interrupted" placeholder frame while the
+# response stays open, so the tile shows a clear message instead of a frozen image and resumes live
+# frames the moment the capture recovers.
 CAPTURE_READ_TIMEOUT_S = 2.0
 RECONNECT_BACKOFF_S = 0.5
-RECOVER_WINDOW_S = 30.0
+STALL_PLACEHOLDER_S = 5.0
+
+PLACEHOLDER_FILENAME = 'placeholder.jpg'
 
 JPEG_SOI = b'\xff\xd8'
 JPEG_EOI = b'\xff\xd9'
@@ -37,6 +41,9 @@ JPEG_EOI = b'\xff\xd9'
 FRAME_SEND = 'send'
 FRAME_DROP = 'drop'
 FRAME_STALE = 'stale'
+
+CAPTURE_FRAME = 'frame'
+CAPTURE_STALLED = 'stalled'
 
 
 def log(msg):
@@ -61,6 +68,17 @@ def extract_jpeg_frames(buffer):
             return frames, remaining[start:]
         frames.append(remaining[start:end + 2])
         remaining = remaining[end + 2:]
+
+
+def first_jpeg(chunks):
+    """The first complete JPEG (SOI..EOI) assembled from an iterable of byte chunks, or b'' when the
+    chunks run out without one. Pure (no I/O), so the snapshot assembly is unit-testable."""
+    buffer = b''
+    for chunk in chunks:
+        frames, buffer = extract_jpeg_frames(buffer + chunk)
+        if frames:
+            return frames[0]
+    return b''
 
 
 def classify_frame(elapsed, frame_interval, unsent_bytes, last_sent_size, send_timeout_ms):
@@ -138,16 +156,21 @@ def socket_req_and_resp(sock_path, request):
 
 class CaptureStream:
     """JPEG frames from a capture unix socket, transparently reconnecting across capture-side stalls
-    so a brief producer hiccup never ends the viewer's MJPEG response. `frames()` yields until the
-    consumer stops reading (client gone) or the capture stays frameless past RECOVER_WINDOW_S.
-    `connect`/`monotonic`/`sleep` are injectable so the reconnect behaviour is unit-testable.
+    so a brief producer hiccup never ends the viewer's MJPEG response. `frames()` yields a
+    (CAPTURE_FRAME, jpeg) for each real frame and a (CAPTURE_STALLED, None) signal once the capture
+    has been frameless past STALL_PLACEHOLDER_S (repeated each reconnect cycle while it stays down),
+    so the caller can surface a placeholder while the response stays open. It keeps reconnecting and
+    only stops when the consumer stops reading (the client is gone). `connect`/`monotonic`/`sleep`
+    are injectable so the reconnect behaviour is unit-testable.
     """
 
-    def __init__(self, sock_path, connect=None, monotonic=time.monotonic, sleep=time.sleep):
+    def __init__(self, sock_path, connect=None, monotonic=time.monotonic, sleep=time.sleep,
+                 stall_after_s=STALL_PLACEHOLDER_S):
         self.sock_path = sock_path
         self._connect = connect or self._default_connect
         self._monotonic = monotonic
         self._sleep = sleep
+        self.stall_after_s = stall_after_s
 
     def _default_connect(self):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -166,8 +189,9 @@ class CaptureStream:
         self._sleep(RECONNECT_BACKOFF_S)
         return self._open()
 
-    def _frameless_too_long(self, last_frame_at):
-        return self._monotonic() - last_frame_at > RECOVER_WINDOW_S
+    def _stall_signal(self, last_frame_at):
+        if self._monotonic() - last_frame_at >= self.stall_after_s:
+            yield (CAPTURE_STALLED, None)
 
     def frames(self):
         buffer = b''
@@ -176,15 +200,14 @@ class CaptureStream:
         try:
             while True:
                 chunk = read_chunk(sock)
-                if chunk is None and self._frameless_too_long(last_frame_at):
-                    return
                 if chunk is None:
+                    yield from self._stall_signal(last_frame_at)
                     sock = self._reopen(sock)
                     continue
                 complete, buffer = extract_jpeg_frames(buffer + chunk)
                 if complete:
                     last_frame_at = self._monotonic()
-                yield from complete
+                yield from ((CAPTURE_FRAME, frame) for frame in complete)
         finally:
             close_quietly(sock)
 
@@ -226,6 +249,7 @@ class CameraHandler(SimpleHTTPRequestHandler):
     webrtc_sock = None
     control_sock = None
     html_dir = None
+    placeholder_jpeg = b''
 
     def log_message(self, format, *args):
         log(f"HTTP {self.address_string()} - {format % args}")
@@ -269,21 +293,32 @@ class CameraHandler(SimpleHTTPRequestHandler):
         else:
             self.send_error(404, 'Not Found')
 
-    def handle_snapshot(self):
-        if not self.jpeg_sock:
-            self.send_error(503, 'Snapshot not available')
-            return
+    def _snapshot_chunks(self):
+        try:
+            yield from read_socket(self.jpeg_sock)
+        except OSError as e:
+            log(f"JPEG error: {e}")
+
+    def _read_one_jpeg(self):
+        return first_jpeg(self._snapshot_chunks())
+
+    def _send_jpeg(self, payload):
         self.send_response(200)
         self.send_header('Content-Type', 'image/jpeg')
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
         self.end_headers()
         try:
-            for chunk in read_socket(self.jpeg_sock):
-                self.wfile.write(chunk)
+            self.wfile.write(payload)
         except (BrokenPipeError, ConnectionResetError) as e:
             log(f"JPEG client disconnected: {e}")
-        except OSError as e:
-            log(f"JPEG error: {e}")
+
+    def handle_snapshot(self):
+        captured = self._read_one_jpeg() if self.jpeg_sock else b''
+        payload = captured or self.placeholder_jpeg
+        if not payload:
+            self.send_error(503, 'Snapshot not available')
+            return
+        self._send_jpeg(payload)
 
     def _begin_mjpeg_response(self):
         self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 128 * 1024)
@@ -304,15 +339,22 @@ class CameraHandler(SimpleHTTPRequestHandler):
         self.connection.sendall(b'\r\n')
         return len(header)
 
+    def _relay_frame(self, frame, pacer):
+        decision = pacer.classify(self._unsent_bytes())
+        if decision == FRAME_STALE:
+            raise TimeoutError(f"no frame sent in {MJPEG_SEND_TIMEOUT_MS}ms")
+        if decision == FRAME_DROP:
+            return
+        header_size = self._send_mjpeg_frame(frame)
+        pacer.note_sent(len(frame), header_size)
+
     def _pump_mjpeg(self, capture, pacer):
-        for frame in capture.frames():
-            decision = pacer.classify(self._unsent_bytes())
-            if decision == FRAME_STALE:
-                raise TimeoutError(f"no frame sent in {MJPEG_SEND_TIMEOUT_MS}ms")
-            if decision == FRAME_DROP:
-                continue
-            header_size = self._send_mjpeg_frame(frame)
-            pacer.note_sent(len(frame), header_size)
+        # A stall signal carries no frame; relay the placeholder in its place (skipped only when the
+        # placeholder asset is missing) so the viewer sees the interrupted message, not a frozen one.
+        for kind, frame in capture.frames():
+            payload = self.placeholder_jpeg if kind == CAPTURE_STALLED else frame
+            if payload:
+                self._relay_frame(payload, pacer)
 
     def handle_mjpeg_stream(self, fps=0):
         if not self.mjpeg_sock:
@@ -323,7 +365,6 @@ class CameraHandler(SimpleHTTPRequestHandler):
         log(f"MJPEG client connected: {self.mjpeg_sock}, fps={fps}")
         try:
             self._pump_mjpeg(CaptureStream(self.mjpeg_sock), pacer)
-            log(f"MJPEG capture gave up ({pacer.stats()})")
         except (BrokenPipeError, ConnectionResetError) as e:
             log(f"MJPEG client disconnected: {e} ({pacer.stats()})")
         except TimeoutError as e:
@@ -385,8 +426,21 @@ def build_arg_parser(default_html_dir):
     return parser
 
 
+def load_placeholder(html_dir):
+    """The "stream interrupted" image shown when the capture is down. It ships beside the player HTML
+    (a committed, architecture-independent asset), so the html dir is also where we read it."""
+    path = os.path.join(html_dir, PLACEHOLDER_FILENAME)
+    try:
+        with open(path, 'rb') as handle:
+            return handle.read()
+    except OSError:
+        log(f"placeholder image not found at {path}")
+        return b''
+
+
 def configure_handler(args):
     CameraHandler.html_dir = args.html_dir
+    CameraHandler.placeholder_jpeg = load_placeholder(args.html_dir)
     CameraHandler.jpeg_sock = args.jpeg_sock
     CameraHandler.mjpeg_sock = args.mjpeg_sock
     CameraHandler.h264_sock = args.h264_sock
