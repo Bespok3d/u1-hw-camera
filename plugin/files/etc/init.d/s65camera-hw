@@ -13,12 +13,17 @@ LMDCTL=$BESPOK3D/etc/init.d/lmdctl
 # registered for the WebRTC stream, so off-by-default would blank it. Turn off only with MJPEG.
 WEBRTC_ENABLED=1
 CAMERA_RESOLUTION=1080p
+WEBRTC_SESSION_TIMEOUT_MIN=0
 [ -f "$PLUGIN/camera.conf" ] && . "$PLUGIN/camera.conf"
 
 case "$CAMERA_RESOLUTION" in
     720p) CAM_WIDTH=1280; CAM_HEIGHT=720 ;;
     *)    CAM_WIDTH=1920; CAM_HEIGHT=1080 ;;
 esac
+
+# 0 = off (a stream lives as long as it is watched). Otherwise recycle each viewer after N minutes;
+# the tile reconnects on its own, so it is a brief blip, not a freeze. Dead viewers are always reaped.
+WEBRTC_SESSION_TIMEOUT_S=$((WEBRTC_SESSION_TIMEOUT_MIN * 60))
 
 # SIGTERM crashes unisrv (std::terminate -> 210MB core, can wedge the display), so route lmd
 # teardown through the jinni-owned lmdctl (SIGKILL + wait-for-gone). Fall back to a direct SIGKILL
@@ -42,7 +47,7 @@ CMD_FAKE_SERVICE_ARGS="--retry 3"
 
 CMD_CAPTURE="$BIN/capture-v4l2-raw-mpp --device /dev/video11 --format nv12 --jpeg-quality 7 --jpeg-sock /tmp/capture-mipi-jpeg.sock --mjpeg-sock /tmp/capture-mipi-mjpeg.sock --h264-sock /tmp/capture-mipi-h264.sock --raw-frame-sock /tmp/capture-mipi-raw.sock --width $CAM_WIDTH --height $CAM_HEIGHT --fps 30"
 
-CMD_WEBRTC="$BIN/stream-webrtc --h264-sock /tmp/capture-mipi-h264.sock --webrtc-sock /tmp/capture-mipi-webrtc.sock"
+CMD_WEBRTC="$BIN/stream-webrtc --h264-sock /tmp/capture-mipi-h264.sock --webrtc-sock /tmp/capture-mipi-webrtc.sock --session-timeout-s $WEBRTC_SESSION_TIMEOUT_S"
 
 start() {
     if [ ! -e /dev/video11 ]; then

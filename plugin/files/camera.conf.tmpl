@@ -1,5 +1,7 @@
 # Rendered by the daemon from the plugin config (install / reconfigure) and sourced by the camera
 # init scripts. WEBRTC_ENABLED gates the second (H264/WebRTC) encoder; CAMERA_RESOLUTION sets the
-# built-in (MIPI) capture resolution.
+# built-in (MIPI) capture resolution. WEBRTC_SESSION_TIMEOUT_MIN recycles each WebRTC viewer after
+# that many minutes (0 = off); a memory-safety backstop, off by default.
 WEBRTC_ENABLED=$WEBRTC_ENABLED
 CAMERA_RESOLUTION=$CAMERA_RESOLUTION
+WEBRTC_SESSION_TIMEOUT_MIN=$WEBRTC_SESSION_TIMEOUT_MIN

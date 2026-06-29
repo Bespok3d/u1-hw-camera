@@ -32,8 +32,6 @@ static h264_stream_t g_h264_stream = H264_STREAM_INIT;
 static constexpr int PING_INTERVAL_MS = 1000;
 static constexpr int CONNECT_TIMEOUT_MS = 30000;
 static constexpr int PONG_TIMEOUT_MS = 30000;
-static constexpr int DEFAULT_SESSION_S = 60 * 60;
-static constexpr int MAX_SESSION_WITHOUT_TIMEOUT_S = 15 * 60;
 
 struct Client {
     std::string id;
@@ -48,7 +46,6 @@ struct Client {
     std::vector<std::string> pending_candidates;
     bool answer_received = false;
     bool keepAlive = false;
-    int timeout_s = 0;
 };
 
 static std::mutex g_clients_mutex;
@@ -57,6 +54,11 @@ static std::atomic<uint64_t> g_client_counter{0};
 static std::string g_h264_sock;
 static std::vector<std::string> g_ice_servers;
 static int g_max_clients = 4;
+// Wall-clock session recycle: 0 = off (a stream lives as long as it is watched). A user can opt in
+// to a periodic recycle as a memory-safety backstop on a constrained board; clients reconnect on
+// their own when it fires, so it is a brief blip, not a freeze. Dead clients are always reaped via
+// the keepalive pong timeout and the Failed/Closed cleanup regardless of this value.
+static int g_session_timeout_s = 0;
 
 static std::shared_ptr<Client> find_client(const std::string& id) {
     std::lock_guard<std::mutex> lock(g_clients_mutex);
@@ -124,11 +126,16 @@ static void ping_clients() {
     std::lock_guard<std::mutex> lock(g_clients_mutex);
     auto now = std::chrono::steady_clock::now();
 
+    // A healthy stream runs as long as the viewer watches it. The optional, user-configured session
+    // recycle below (off unless --session-timeout-s > 0) is a memory-safety backstop; a genuinely
+    // dead client is always reaped via the connect timeout, the keepalive pong timeout, and the
+    // Failed/Closed state cleanup, independent of that setting.
     for (auto& c : g_clients) {
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - c->start_time).count();
 
-        if (c->timeout_s > 0 && elapsed >= c->timeout_s) {
-            log_errorf("Client %s session timeout\n", c->id.c_str());
+        if (g_session_timeout_s > 0 && elapsed >= g_session_timeout_s) {
+            log_errorf("Client %s session recycle (%ds, user-configured)\n",
+                       c->id.c_str(), g_session_timeout_s);
             c->pc->close();
             continue;
         }
@@ -218,20 +225,7 @@ static std::shared_ptr<Client> create_client(const json& request) {
         }
     });
 
-    if (request.contains("timeout_s") && request["timeout_s"].is_number()) {
-        client->timeout_s = request["timeout_s"].get<int>();
-    }
-
-    if (client->timeout_s <= 0) {
-        client->timeout_s = DEFAULT_SESSION_S;
-    }
-
     client->keepAlive = request.value("keepAlive", false);
-
-    if (!client->keepAlive && client->timeout_s > MAX_SESSION_WITHOUT_TIMEOUT_S) {
-        log_errorf("Capping client timeout to %d seconds since keepAlive is false\n", MAX_SESSION_WITHOUT_TIMEOUT_S);
-        client->timeout_s = MAX_SESSION_WITHOUT_TIMEOUT_S;
-    }
 
     {
         std::lock_guard<std::mutex> lock(g_clients_mutex);
@@ -391,6 +385,7 @@ static void print_usage(const char* prog) {
     printf("  --webrtc-sock <path>   Unix socket for WebRTC signaling\n");
     printf("  --h264-sock <path>     H264 stream input socket\n");
     printf("  --max-clients <n>      Max concurrent clients (default: 4)\n");
+    printf("  --session-timeout-s <n> Recycle each viewer after n seconds (0 = off, default)\n");
     printf("  --stun <url>           STUN server URL (can be repeated)\n");
     printf("  --debug                Enable debug output\n");
     printf("  --help                 Show this help\n");
@@ -405,18 +400,20 @@ int main(int argc, char* argv[]) {
         OPT_WEBRTC_SOCK = 1,
         OPT_H264_SOCK,
         OPT_MAX_CLIENTS,
+        OPT_SESSION_TIMEOUT,
         OPT_STUN,
         OPT_DEBUG,
         OPT_HELP,
     };
 
     static struct option long_options[] = {
-        {"webrtc-sock",  required_argument, 0, OPT_WEBRTC_SOCK},
-        {"h264-sock",    required_argument, 0, OPT_H264_SOCK},
-        {"max-clients",  required_argument, 0, OPT_MAX_CLIENTS},
-        {"stun",         required_argument, 0, OPT_STUN},
-        {"debug",        no_argument,       0, OPT_DEBUG},
-        {"help",         no_argument,       0, OPT_HELP},
+        {"webrtc-sock",     required_argument, 0, OPT_WEBRTC_SOCK},
+        {"h264-sock",       required_argument, 0, OPT_H264_SOCK},
+        {"max-clients",     required_argument, 0, OPT_MAX_CLIENTS},
+        {"session-timeout-s", required_argument, 0, OPT_SESSION_TIMEOUT},
+        {"stun",            required_argument, 0, OPT_STUN},
+        {"debug",           no_argument,       0, OPT_DEBUG},
+        {"help",            no_argument,       0, OPT_HELP},
         {0, 0, 0, 0}
     };
 
@@ -431,6 +428,9 @@ int main(int argc, char* argv[]) {
             break;
         case OPT_MAX_CLIENTS:
             g_max_clients = std::atoi(optarg);
+            break;
+        case OPT_SESSION_TIMEOUT:
+            g_session_timeout_s = std::atoi(optarg);
             break;
         case OPT_STUN:
             g_ice_servers.push_back(optarg);
@@ -464,6 +464,8 @@ int main(int argc, char* argv[]) {
     log_printf("WebRTC socket: %s\n", webrtc_sock.c_str());
     log_printf("H264 socket: %s\n", g_h264_sock.c_str());
     log_printf("Max clients: %d\n", g_max_clients);
+    log_printf("Session recycle: %s\n",
+               g_session_timeout_s > 0 ? std::to_string(g_session_timeout_s).c_str() : "off");
 
     unlink(webrtc_sock.c_str());
 

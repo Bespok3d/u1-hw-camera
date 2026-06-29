@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.5
+
+- The WebRTC camera view no longer freezes after a while. The streaming server
+  used to recycle a viewer's connection on a hidden timer (even a perfectly
+  healthy one), which left the camera tile frozen on its last frame until you
+  refreshed. A connection is now kept alive for as long as you are watching, and
+  dropped only when it is genuinely dead (the keepalive and connect checks still
+  reap an abandoned viewer). Mainsail and the built-in viewer reconnect on their
+  own if a connection ever does drop; Fluidd's WebRTC tile does not yet (refresh
+  to recover), a Fluidd-side limitation with an upstream fix proposed.
+- The periodic recycle is now your choice, not a hidden default. A new
+  "Recycle WebRTC viewers after (minutes)" setting is off by default; set it to a
+  number of minutes if you want a memory-safety backstop on a very constrained
+  board.
+
 ## 0.1.4
 
 - The camera stream no longer freezes until you refresh. If the capture pipeline briefly stalls or

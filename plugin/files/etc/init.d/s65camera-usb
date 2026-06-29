@@ -11,14 +11,19 @@ DEV_ID="$(echo "$DEVICE" | sed 's|/dev/||')"
 # WebRTC defaults ON (see camera.conf, rendered by the daemon); the USB camera streams at its own
 # native resolution, so CAMERA_RESOLUTION does not apply here.
 WEBRTC_ENABLED=1
+WEBRTC_SESSION_TIMEOUT_MIN=0
 [ -f "$PLUGIN/camera.conf" ] && . "$PLUGIN/camera.conf"
+
+# 0 = off (a stream lives as long as it is watched). Otherwise recycle each viewer after N minutes;
+# the tile reconnects on its own, so it is a brief blip, not a freeze. Dead viewers are always reaped.
+WEBRTC_SESSION_TIMEOUT_S=$((WEBRTC_SESSION_TIMEOUT_MIN * 60))
 
 CMD_FAKE_SERVICE="$BIN/fake-service"
 CMD_FAKE_SERVICE_ARGS="--retry 3"
 
 CMD_CAPTURE="$BIN/capture-v4l2-jpeg-mpp --device $DEVICE --jpeg-sock /tmp/capture-${DEV_ID}-jpeg.sock --mjpeg-sock /tmp/capture-${DEV_ID}-mjpeg.sock --h264-sock /tmp/capture-${DEV_ID}-h264.sock"
 
-CMD_WEBRTC="$BIN/stream-webrtc --h264-sock /tmp/capture-${DEV_ID}-h264.sock --webrtc-sock /tmp/capture-${DEV_ID}-webrtc.sock"
+CMD_WEBRTC="$BIN/stream-webrtc --h264-sock /tmp/capture-${DEV_ID}-h264.sock --webrtc-sock /tmp/capture-${DEV_ID}-webrtc.sock --session-timeout-s $WEBRTC_SESSION_TIMEOUT_S"
 
 start() {
     if [ ! -e "$DEVICE" ]; then
