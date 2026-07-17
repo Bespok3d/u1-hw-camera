@@ -66,9 +66,9 @@ class ConnectFactory:
 
 
 def make_stream(connect, clock, stall_after_s=5.0, advance=3.0):
-    # Each reconnect's backoff sleep advances the injected clock by `advance` seconds, so a handful of
-    # frameless cycles deterministically crosses (advance < stall) or stays under (advance small) the
-    # stall threshold.
+    # Each reconnect's backoff sleep advances the injected clock by `advance` seconds, so a handful
+    # of frameless cycles deterministically crosses (advance < stall) or stays under (advance
+    # small) the stall threshold.
     return camera_stream.CaptureStream(
         '/capture.sock', connect=connect, monotonic=clock,
         sleep=lambda _seconds: clock.advance(advance), stall_after_s=stall_after_s,
@@ -220,3 +220,24 @@ def test_pacer_counts_sent_then_drops_on_backpressure():
     assert pacer.sent == 1
     assert pacer.classify(3000) == camera_stream.FRAME_DROP
     assert pacer.dropped == 1
+
+
+# ── translate_path (query strings on the HTML routes) ──────────────────────────────────────────
+
+def translate(path):
+    """CameraHandler.translate_path without the socket machinery: the guard and the lookup are pure,
+    so binding html_dir on a bare instance is enough to exercise them."""
+    handler = camera_stream.CameraHandler.__new__(camera_stream.CameraHandler)
+    handler.html_dir = '/html'
+    return camera_stream.CameraHandler.translate_path(handler, path)
+
+
+def test_translate_path_keeps_serving_an_html_route_that_carries_a_query():
+    # the guard strips the query before checking, so the lookup must strip it too; indexing with the
+    # raw path raised KeyError and killed the connection, which nginx surfaced as a 502
+    assert translate('/?action=stream') == '/html/index.html'
+    assert translate('/player?fps=15') == '/html/player.html'
+
+
+def test_translate_path_refuses_a_path_outside_the_allowed_set():
+    assert translate('/../etc/passwd') is None

@@ -14,6 +14,11 @@ on:
       - '*/src/**'
       - '*/toolchain/**'
       - '*/tests/**'
+      # This repo keeps src/ and toolchain/ at the ROOT, not one dir deep, so the '*/'-prefixed
+      # filters above (which match plugin/...) never see a source change on their own.
+      - 'src/**'
+      - 'toolchain/**'
+      - 'tests/**'
       - .github/workflows/release.yml
   workflow_dispatch:
 

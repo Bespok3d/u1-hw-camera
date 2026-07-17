@@ -1,7 +1,7 @@
 {
   "name": "camera-hw-accel",
   "title": "Camera HW Accel",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Tap into the SoC's video pipeline instead of CPU-encoding every frame. MJPEG over HTTP at /webcam, WebRTC at /webrtc; works on any browser, smooth 30fps even with two cameras attached.\n\nTo have these auto-registered as cameras in Fluidd and Mainsail (so you don't have to add them by hand under Settings \u2192 Cameras), also install b3d://bespok3d-org/webcam-builtin for the built-in MIPI camera and b3d://bespok3d-org/webcam-usb for the external USB camera.",
   "tagline": "HW-accelerated MJPEG and WebRTC streaming for MIPI & USB cameras.",
   "category": "camera",
@@ -59,6 +59,25 @@
       "default": "0",
       "hint": "0 (recommended): a camera stays connected as long as you watch it. Set a number of minutes to periodically recycle each WebRTC viewer connection as a memory-safety backstop on a very constrained board; the tile reconnects on its own within a couple of seconds, so it no longer freezes. Dead or abandoned viewers are always cleaned up regardless of this setting.",
       "userEditable": true
+    }
+  ],
+  "bake": [
+    {
+      "class": "docker-c",
+      "dockerfile": "../toolchain/Dockerfile",
+      "context": "..",
+      "platform": "linux/arm64",
+      "out": "/out",
+      "members": [
+        { "path": "capture-v4l2-raw-mpp", "dest": "files/bin/capture-v4l2-raw-mpp", "mode": "0755" },
+        { "path": "capture-v4l2-jpeg-mpp", "dest": "files/bin/capture-v4l2-jpeg-mpp", "mode": "0755" },
+        { "path": "stream-webrtc", "dest": "files/bin/stream-webrtc", "mode": "0755" },
+        { "path": "stream-rtsp", "dest": "files/bin/stream-rtsp", "mode": "0755" },
+        { "path": "camera-stream.py", "dest": "files/bin/camera-stream.py", "mode": "0755" },
+        { "path": "control-v4l2.py", "dest": "files/bin/control-v4l2.py", "mode": "0755" },
+        { "path": "fake-service", "dest": "files/bin/fake-service", "mode": "0755" },
+        { "path": "libv4l2-imposter.so", "dest": "files/bin/libv4l2-imposter.so", "mode": "0755" }
+      ]
     }
   ],
   "install": {
