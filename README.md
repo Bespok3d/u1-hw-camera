@@ -18,8 +18,8 @@ plugin/                  the plugin itself
   doc/                   onboard docs rendered in the app
 src/{fake-service,v4l2-imposter}   hand-written C sources (compiled by the toolchain)
 toolchain/               the arm64 (Rockchip MPP) build
-  Dockerfile, build.sh   builds the binaries (clones paxx12/v4l2-mpp, compiles src/)
-  lib/                   shared docker helpers (base image + build/extract)
+  Dockerfile             builds the binaries (clones paxx12/v4l2-mpp, compiles src/); b3-builder's
+                         docker bake step runs it
   dist/                  BUILD OUTPUT, gitignored: the compiled binaries
 .github/workflows/release.yml   CI: pack -> release -> register the atom in main-index
 ```
@@ -27,18 +27,17 @@ toolchain/               the arm64 (Rockchip MPP) build
 ## Build locally
 
 Needs Node.js 20+, plus Docker for the binaries (they are arm64; the build runs
-`--platform linux/arm64`, emulated on non-arm hosts).
+`--platform linux/arm64`, emulated on non-arm hosts). `--bake` runs the toolchain Dockerfile, stages
+the compiled binaries into `plugin/files/bin`, then packs:
 
 ```sh
-sh toolchain/build.sh                          # compiles src/ into toolchain/dist/ (the slow step)
-mkdir -p plugin/files/bin && cp toolchain/dist/* plugin/files/bin/
 npm install github:Bespok3d/b3-builder
-npx b3-builder build --source ./plugin --atom-repo Bespok3d/u1-hw-camera
+npx b3-builder build --source ./plugin --atom-repo Bespok3d/u1-hw-camera --bake
 # -> dist/camera-hw-accel-<ver>.b3 + dist/camera-hw-accel.atom.json
 ```
 
-The manifest symlinks `files/bin` onto the printer, so a `.b3` packed without staged binaries ships
-a broken plugin.
+The manifest symlinks `files/bin` onto the printer; `--bake` stages the compiled binaries there, so
+always build with it.
 
 ## Releasing
 
