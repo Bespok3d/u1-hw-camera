@@ -58,8 +58,9 @@ def test_placeholder_h264_is_an_annexb_keyframe():
     data = _header_bytes()
     assert data.startswith(b"\x00\x00\x00\x01"), "must open on a 4-byte start code"
     types = _nal_types_via_long_start_codes(data)
-    # Both the capture feed and the RTP packetizer (LongStartSequence) split on 4-byte codes only, so
-    # every NAL must be reachable that way, and the frame must be self-contained (its own SPS + IDR).
+    # Both the capture feed and the RTP packetizer (LongStartSequence) split on 4-byte codes only,
+    # so every NAL must be reachable that way, and the frame must be self-contained (its own SPS +
+    # IDR).
     assert NAL_SPS in types, f"no SPS among 4-byte-delimited NALs: {types}"
     assert NAL_IDR in types, f"no IDR among 4-byte-delimited NALs: {types}"
 
@@ -78,14 +79,14 @@ def test_webrtc_server_surfaces_the_placeholder():
     # shown while the feed is down past the stall threshold...
     assert "maybe_send_placeholder" in text
     assert "PLACEHOLDER_AFTER_MS" in text
-    # ...and once before a deliberate teardown (recycle / pong timeout) so the close is not a freeze.
+    # ...and once before a deliberate teardown (recycle/pong timeout) so the close is not a freeze.
     assert "send_placeholder_to" in text
 
 
 def test_webrtc_deliberate_close_is_deferred_so_the_placeholder_lands():
     # An immediate pc->close() after sending the placeholder drops the queued keyframe and the tile
-    # freezes on its last live frame. The close must be deferred (placeholder, stop live frames, flush,
-    # then close).
+    # freezes on its last live frame. The close must be deferred (placeholder, stop live frames,
+    # flush, then close).
     text = WEBRTC_SERVER.read_text(encoding="utf-8")
     assert "PLACEHOLDER_FLUSH_MS" in text
     assert "begin_close" in text and "advance_close" in text

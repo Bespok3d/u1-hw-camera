@@ -36,12 +36,16 @@ COPY src/v4l2-mpp/apps ./apps
 COPY src/v4l2-mpp/common ./common
 COPY src/fake-service /build/fake-service
 COPY src/v4l2-imposter /build/v4l2-imposter
+COPY src/wait-for-frame /build/wait-for-frame
 
 RUN make install DESTDIR=/dist \
     && make -C /build/fake-service install DESTDIR=/dist \
-    && make -C /build/v4l2-imposter install DESTDIR=/dist
+    && make -C /build/v4l2-imposter install DESTDIR=/dist \
+    && make -C /build/wait-for-frame install DESTDIR=/dist
 
-RUN mkdir -p /out/html \
-    && find /dist/usr/local/bin -maxdepth 1 -type f ! -name "detect-*.py" -exec cp {} /out/ \; \
-    && find /dist/usr/local/lib -maxdepth 1 -name "*.so" -exec cp {} /out/ \; \
-    && cp -r /dist/usr/share/camera-stream/html/. /out/html/ 2>/dev/null || true
+# /out holds exactly the members plugin/manifest.json declares: the bake fails on anything else left here.
+# The html tree is not built, it is source in plugin/files/html, so copying it here only produced a stale
+# duplicate under files/bin/html.
+RUN mkdir -p /out \
+    && find /dist/usr/local/bin -maxdepth 1 -type f ! -name "detect-*.py" -exec cp {} /out/ ';' \
+    && find /dist/usr/local/lib -maxdepth 1 -name "*.so" -exec cp {} /out/ ';'

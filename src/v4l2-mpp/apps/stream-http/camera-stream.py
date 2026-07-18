@@ -258,7 +258,7 @@ class CameraHandler(SimpleHTTPRequestHandler):
         parsed_path = urlparse(path).path
         if parsed_path not in ALLOWED_PATHS:
             return None
-        return os.path.join(self.html_dir, ALLOWED_PATHS[path])
+        return os.path.join(self.html_dir, ALLOWED_PATHS[parsed_path])
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -349,8 +349,9 @@ class CameraHandler(SimpleHTTPRequestHandler):
         pacer.note_sent(len(frame), header_size)
 
     def _pump_mjpeg(self, capture, pacer):
-        # A stall signal carries no frame; relay the placeholder in its place (skipped only when the
-        # placeholder asset is missing) so the viewer sees the interrupted message, not a frozen one.
+        # A stall signal carries no frame; relay the placeholder in its place (skipped only when
+        # the placeholder asset is missing) so the viewer sees the interrupted message, not a
+        # frozen one.
         for kind, frame in capture.frames():
             payload = self.placeholder_jpeg if kind == CAPTURE_STALLED else frame
             if payload:
@@ -427,8 +428,8 @@ def build_arg_parser(default_html_dir):
 
 
 def load_placeholder(html_dir):
-    """The "stream interrupted" image shown when the capture is down. It ships beside the player HTML
-    (a committed, architecture-independent asset), so the html dir is also where we read it."""
+    """The "stream interrupted" image shown when the capture is down. It ships beside the player
+    HTML (a committed, architecture-independent asset), so the html dir is also where we read it."""
     path = os.path.join(html_dir, PLACEHOLDER_FILENAME)
     try:
         with open(path, 'rb') as handle:

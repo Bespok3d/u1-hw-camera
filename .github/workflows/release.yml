@@ -1,102 +1,45 @@
 name: build-and-release
 
-# On a push to main that changes the plugin, its toolchain, or the build scripts: build the
-# arm64 camera binaries, pack the .b3, publish a GitHub release, and write the index atom into
-# Bespok3d/main-index so the published catalog picks the plugin up.
+# Build, test, pack, and release every plugin in this repo through the one reusable Bespok3d build
+# Action (b3-builder), then register the produced atoms into the org's main index. This repo publishes
+# no list of its own: it contributes atoms to someone else's index, so it passes no list inputs and the
+# registration is a separate org-owned step.
 on:
   push:
     branches: [main]
     paths:
-      - plugin/**
-      - src/**
-      - toolchain/**
-      - scripts/**
+      - '*/manifest.json'
+      - '*/files/**'
+      - '*/doc/**'
+      - '*/src/**'
+      - '*/toolchain/**'
+      - '*/tests/**'
+      # This repo keeps src/ and toolchain/ at the ROOT, not one dir deep, so the '*/'-prefixed
+      # filters above (which match plugin/...) never see a source change on their own.
+      - 'src/**'
+      - 'toolchain/**'
+      - 'tests/**'
       - .github/workflows/release.yml
   workflow_dispatch:
 
 jobs:
   build-and-release:
-    # ARM64 SWITCH: this runs the build under QEMU emulation on a standard x86 runner. To move to
-    # a native arm64 runner later, change `runs-on` to `ubuntu-24.04-arm` and delete the
-    # "Set up QEMU" step below. Nothing else changes (build.sh already targets linux/arm64).
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # create the release on this repo
+      contents: write   # create releases on this repo
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up QEMU (arm64 emulation)   # delete this step when moving to a native arm64 runner
-        uses: docker/setup-qemu-action@v3
         with:
-          platforms: arm64
+          fetch-depth: 0
 
-      - uses: docker/setup-buildx-action@v3
-
-      # Exposes ACTIONS_CACHE_URL + ACTIONS_RUNTIME_TOKEN so buildx can read/write the GitHub
-      # Actions layer cache (the type=gha referenced by B3D_CACHE_ARGS below).
-      - uses: crazy-max/ghaction-github-runtime@v3
-
-      - uses: actions/setup-node@v4
+      - uses: Bespok3d/b3-builder@main
         with:
-          node-version: '20'
+          unit: repo
+          bake: 'true'
+          atom-repo: ${{ github.repository }}
 
-      - name: Build arm64 camera binaries
-        # First run fills the cache (slow, full QEMU build); every run after restores the apt +
-        # v4l2-mpp deps layers and only recompiles src/. To go faster still, switch to a native
-        # arm64 runner (see the runs-on note above) and this caching becomes unnecessary.
-        env:
-          B3D_CACHE_ARGS: --cache-from type=gha --cache-to type=gha,mode=max
-        run: sh toolchain/build.sh
-
-      - name: Pack the .b3
-        run: sh scripts/pack.sh
-
-      - name: Resolve version
-        id: ver
-        run: echo "version=$(jq -r '.version' plugin/manifest.json)" >> "$GITHUB_OUTPUT"
-
-      - name: Publish release + upload .b3
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          TAG="camera-hw-accel-v${VERSION}"
-          ASSET="camera-hw-accel-${VERSION}.b3"
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --notes "Automated release of ${ASSET}"
-          fi
-          gh release upload "$TAG" "dist/${ASSET}" --clobber
-
-      - name: Generate atom with the release asset URL
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          TAG="camera-hw-accel-v${VERSION}"
-          ASSET="camera-hw-accel-${VERSION}.b3"
-          # The asset's API URL (.url, not browser_download_url) is what the app fetches with a
-          # bearer token + Accept: application/octet-stream (works for private repos).
-          DOWNLOAD_URL=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
-            --jq ".assets[] | select(.name==\"${ASSET}\") | .url")
-          echo "download_url=${DOWNLOAD_URL}"
-          node scripts/generate-atom.mjs --download-url "$DOWNLOAD_URL" --repo "$GITHUB_REPOSITORY"
-
-      - name: Commit atom into Bespok3d/main-index
-        env:
-          # Fine-grained PAT with contents:write on Bespok3d/main-index (the per-repo GITHUB_TOKEN
-          # cannot write a sibling repo). Create it in the org and add it as this repo's secret.
-          MAIN_INDEX_TOKEN: ${{ secrets.MAIN_INDEX_TOKEN }}
-        run: |
-          git clone "https://x-access-token:${MAIN_INDEX_TOKEN}@github.com/Bespok3d/main-index.git" main-index
-          mkdir -p main-index/atoms
-          cp dist/camera-hw-accel.atom.json main-index/atoms/camera-hw-accel.atom.json
-          cd main-index
-          git config user.name "bespok3d-bot"
-          git config user.email "bot@bespok3d.local"
-          git add atoms/camera-hw-accel.atom.json
-          if git diff --cached --quiet; then
-            echo "atom unchanged; nothing to commit"
-          else
-            git commit -m "camera-hw-accel ${{ steps.ver.outputs.version }}: update atom"
-            git push
-          fi
+      - uses: Bespok3d/main-index/.github/actions/register-atoms@main
+        with:
+          # Per-repo Actions secret today (GitHub Free cannot org-secret private repos); becomes ONE org
+          # secret every repo inherits when the repos go public.
+          token: ${{ secrets.MAIN_INDEX_TOKEN }}

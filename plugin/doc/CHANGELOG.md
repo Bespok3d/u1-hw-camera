@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.8
+
+- The frame wait 0.1.4 announced now actually ships. Its helper was never included in the package, so
+  every start skipped the wait and reported a timeout it had not waited for. Installing both cameras
+  could therefore still leave them serving no frames (nginx 502) on a cold start, which is exactly
+  what 0.1.4 set out to fix.
+
+## 0.1.7
+
+- A camera URL that carries a query (`/?action=stream`, `/player?fps=15`) no longer drops the
+  connection. The stream server accepted the address but then looked it up with the query still
+  attached, found nothing, and killed the request, which the printer's web server showed as a
+  502 error page. The streams themselves (`/stream.mjpg`, `/snapshot.jpg`) were never affected.
+
 ## 0.1.6
 
 - When a camera you are watching stops, the tile now shows a clear "Stream
