@@ -32,4 +32,4 @@ fi
 
 ./genMakefiles "$CONFIG_FILE"
 rm -rf usr-local
-make -j$(nproc) install PREFIX="$(pwd)/usr-local"
+make -j"$(nproc)" install PREFIX="$(pwd)/usr-local"

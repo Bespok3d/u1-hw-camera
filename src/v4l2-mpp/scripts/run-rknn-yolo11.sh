@@ -7,6 +7,7 @@ if [[ ! -d /tmp/v4l2-venv ]]; then
     python3 -m venv /tmp/v4l2-venv
 fi
 
+# shellcheck source=/dev/null
 source /tmp/v4l2-venv/bin/activate
 
 if [[ ! -e /tmp/v4l2-venv/initialized ]]; then
@@ -15,7 +16,7 @@ if [[ ! -e /tmp/v4l2-venv/initialized ]]; then
     touch /tmp/v4l2-venv/initialized
 fi
 
-cd "$DIR"
+cd "$DIR" || exit
 
 set -x
 
