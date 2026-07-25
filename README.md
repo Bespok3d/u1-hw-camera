@@ -5,8 +5,7 @@ WebRTC streaming for the MIPI and USB cameras, tapping the Rockchip SoC video pi
 of CPU-encoding every frame. This repo holds the plugin source, its arm64 build toolchain, and
 the CI that publishes a `.b3` release and registers the plugin in the official list.
 
-It is a worked example of a Bespok3d plugin repo. For the concepts see the Bespok3d docs:
-`doc/anatomy-of-a-plugin.md`, `doc/package-format.md`, `doc/anatomy-of-a-list.md`.
+It is a worked example of a Bespok3d plugin repo.
 
 ## Layout
 
