@@ -13,6 +13,6 @@ CMD="$2"
 shift 2
 
 set -xeo pipefail
-make install DESTDIR=$PWD/tmp/v4l2
+make install DESTDIR="$PWD/tmp/v4l2"
 scp -r tmp/v4l2/. scripts/run-*.sh "$SSH_HOST":/tmp/v4l2
 ssh -t "$SSH_HOST" "/tmp/v4l2/$CMD" "$@"

@@ -5,6 +5,8 @@ BINDIR="$DIR/usr/local/bin"
 HTMLDIR="$DIR/usr/share/camera-stream/html"
 
 cleanup() {
+    # Word-splitting is intended: PIDS holds space-separated background pids.
+    # shellcheck disable=SC2086
     kill $PIDS 2>/dev/null
     exit 1
 }
@@ -25,7 +27,7 @@ fi
     --h264-sock /tmp/capture-mipi-h264.sock &
 PIDS="$!"
 
-$BINDIR/control-v4l2.py \
+"$BINDIR/control-v4l2.py" \
     --device /dev/video11 \
     --sock /tmp/control-mipi.sock \
     --state-file /tmp/control-mipi.json &
