@@ -1,4 +1,6 @@
 #!/bin/sh
+# Rewritten by the Bespok3d project from the Extended Firmware overlay 60-app-camera file
+# root/etc/init.d/S99v4l2-mpp-usb (paxx12), GPL-3.0. Origin recorded 2026-07-28.
 
 BESPOK3D=/userdata/bespok3d
 PLUGIN=$BESPOK3D/usr/local/plugins/camera-hw-accel

@@ -1,0 +1,37 @@
+version = 1
+
+# This repo is GPL-3.0-only as a whole. It carries a vendored copy of v4l2-mpp, which grants
+# GPL-3.0-or-later, and its own camera work has Extended Firmware lineage, which is GPL-3.0-only.
+# The more restrictive suffix governs the repo and v4l2-mpp's grant permits it.
+#
+# `precedence = "aggregate"` throughout: a file that carries its own SPDX header keeps it, and these
+# blocks only fill in the files that do not.
+#
+# The LICENSES directory also holds Apache-2.0, MPL-2.0 and LGPL-2.1. Those cover Rockchip MPP,
+# libdatachannel and live555, which are fetched by `toolchain/Dockerfile` and linked into the camera
+# binary at build time. No copy of them is in this repo, so no file here carries their tag and
+# `reuse lint` reports them as unused. The texts stay because the built package conveys those
+# libraries and must carry their licences.
+
+[[annotations]]
+path = "**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (C) 2026 unlucio and the Bespok3d contributors"
+SPDX-License-Identifier = "GPL-3.0-only"
+
+# The vendored v4l2-mpp source tree, taken at commit 10fc3b9d935d9c79bacc014839c05de4a004c4ac.
+# Its LICENSE states "GNU General Public License v3.0 or later". It states no copyright holder
+# anywhere in the tree, so the holder is recorded as its authors and nothing is invented.
+[[annotations]]
+path = "src/v4l2-mpp/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "The v4l2-mpp authors"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+# The shipped web pages are byte-identical copies of v4l2-mpp's own
+# `apps/stream-http/html/`, verified by sha256. They are v4l2-mpp's work, not ours.
+[[annotations]]
+path = "plugin/files/html/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "The v4l2-mpp authors"
+SPDX-License-Identifier = "GPL-3.0-or-later"

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 unlucio and the Bespok3d contributors
+# SPDX-License-Identifier: GPL-3.0-only
 name: pr-gate
 
 # Every pull request runs this repo's own check suite (scripts/check.sh) plus the shared em-dash and
@@ -39,6 +41,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # check.sh runs the per-file licence check through `reuse`, which is not on the runner image.
+      # Without it the check reports itself as skipped, so a file naming a licence whose text is
+      # missing from LICENSES/ would reach main unnoticed. Installed with pip rather than through a
+      # marketplace action, so the workflow-pinning guard has nothing new to pin. The
+      # charset-normalizer extra is not optional: reuse aborts on start without an encoding backend.
+      - name: Install the REUSE licence linter
+        run: pip install 'reuse[charset-normalizer]'
 
       - name: Repo gate (shared detectors + check suite)
         run: bash scripts/check.sh
