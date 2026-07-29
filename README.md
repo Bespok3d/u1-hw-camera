@@ -1,5 +1,11 @@
 # u1-hw-camera
 
+[![licence](https://img.shields.io/badge/licence-GPL--3.0-blue)](LICENSE)
+[![release](https://img.shields.io/github/v/release/Bespok3d/u1-hw-camera)](https://github.com/Bespok3d/u1-hw-camera/releases)
+[![version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FBespok3d%2Fu1-hw-camera%2Fmain%2Fplugin%2Fmanifest.json&query=%24.version&label=version&color=blue)](plugin/manifest.json)
+![printer](https://img.shields.io/badge/printer-Snapmaker%20U1-informational)
+![stock firmware](https://img.shields.io/badge/stock%20firmware-no%20flashing-brightgreen)
+
 The Bespok3d **Camera HW Accel** plugin for the Snapmaker U1: hardware-accelerated MJPEG +
 WebRTC streaming for the MIPI and USB cameras, tapping the Rockchip SoC video pipeline instead
 of CPU-encoding every frame. This repo holds the plugin source, its arm64 build toolchain, and
