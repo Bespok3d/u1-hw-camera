@@ -1,4 +1,5 @@
 import itertools
+import json
 from pathlib import Path
 
 import camera_stream
@@ -294,8 +295,18 @@ def test_translate_path_refuses_a_path_outside_the_allowed_set():
 
 def test_the_shipped_stream_server_matches_the_source_it_is_tested_from():
     # plugin/files/bin/camera-stream.py is what the daemon installs and runs. These tests exercise
-    # the src/ copy, so a divergence would mean the printer runs code no test ever saw.
+    # the src/ copy, so a divergence would mean the printer runs code no test ever saw. That copy is
+    # a build output a fresh checkout does not carry, so the check that always holds is the manifest
+    # declaring the shipped file is baked from this source: an undeclared file ships nowhere at all,
+    # which is how the 0.1.4 frame wait went missing from the package. The bytes are compared once a
+    # local bake has produced them.
     camera_dir = Path(__file__).resolve().parent.parent
-    shipped = camera_dir / 'plugin' / 'files' / 'bin' / 'camera-stream.py'
     source = camera_dir / 'src' / 'v4l2-mpp' / 'apps' / 'stream-http' / 'camera-stream.py'
-    assert shipped.read_bytes() == source.read_bytes()
+    manifest = json.loads((camera_dir / 'plugin' / 'manifest.json').read_text())
+    baked_members = manifest['bake'][0]['members']
+    declared_sources = [member['path'] for member in baked_members
+                        if member['dest'] == 'files/bin/camera-stream.py']
+    assert declared_sources == [source.name]
+    shipped = camera_dir / 'plugin' / 'files' / 'bin' / 'camera-stream.py'
+    if shipped.exists():
+        assert shipped.read_bytes() == source.read_bytes()
