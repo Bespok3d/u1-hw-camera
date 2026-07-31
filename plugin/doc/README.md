@@ -48,6 +48,14 @@ Open the plugin's **Config** tab to adjust these:
   resolution.
 - **Recycle WebRTC viewers after (minutes)** (default 0 = off): see "Staying connected" below.
 
+## While a stream is starting
+
+Opening a camera tile starts its stream, which takes a moment. Until the first picture arrives the
+tile says **"Connecting..."**, so you know it is coming up rather than being told to refresh a page
+that is simply not ready yet. If no picture has arrived after 30 seconds the tile stops promising and
+switches to the "Stream interrupted" message below, so a camera that is genuinely not there still
+gives you something to act on.
+
 ## When a stream is interrupted
 
 If a camera you are watching stops, the tile shows a clear **"Stream interrupted"** message in place

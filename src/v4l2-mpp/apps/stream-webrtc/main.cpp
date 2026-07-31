@@ -21,7 +21,8 @@
 
 #include "h264_frames.h"
 #include "h264_stream.h"
-#include "placeholder_h264.h"
+#include "connecting_h264.h"
+#include "interrupted_h264.h"
 #include "log.h"
 
 using json = nlohmann::json;
@@ -34,16 +35,24 @@ static constexpr int PING_INTERVAL_MS = 1000;
 static constexpr int CONNECT_TIMEOUT_MS = 30000;
 static constexpr int PONG_TIMEOUT_MS = 30000;
 
-// Show the placeholder only after the feed has been silent this long, so a normal GOP-boundary or a
-// brief capture respawn gap does not flash the message; resend it on this cadence while the feed
-// stays down so a viewer that connects mid-stall still gets a fresh keyframe quickly.
-static constexpr int PLACEHOLDER_AFTER_MS = 5000;
-static constexpr int PLACEHOLDER_RESEND_MS = 1000;
+// A viewer waiting for its first picture is told the camera is connecting this soon, the same moment
+// the MJPEG server says it. A viewer whose live video stopped waits longer before the interrupted
+// message, so a normal GOP boundary or a brief capture respawn gap never flashes it. Both splashes
+// are resent on this cadence while the silence lasts, so a viewer gets a fresh keyframe quickly.
+static constexpr int CONNECTING_AFTER_SILENT_MS = 2000;
+static constexpr int INTERRUPTED_AFTER_SILENT_MS = 5000;
+static constexpr int SPLASH_RESEND_MS = 1000;
 
-// On a deliberate close (recycle / pong timeout) we send the placeholder, then keep the connection up
+// How long a viewer that has never had a single frame is told the camera is connecting. Past this it
+// is treated as a stream that will not come, and it gets the interrupted message and its offer to
+// refresh.
+static constexpr int GIVE_UP_CONNECTING_MS = 30000;
+
+// When the server closes a stream itself (recycle / pong timeout) it sends the splash, then keeps
+// the connection up
 // this long so the keyframe actually reaches the browser before the transport is torn down; an
 // immediate close drops the queued frame and the tile freezes on its last live image instead.
-static constexpr int PLACEHOLDER_FLUSH_MS = 1000;
+static constexpr int SPLASH_FLUSH_MS = 1000;
 
 struct Client {
     std::string id;
@@ -59,6 +68,14 @@ struct Client {
     bool answer_received = false;
     bool keepAlive = false;
     bool closing = false;
+    // Has a picture this viewer can actually decode reached it, meaning a keyframe? Before that it
+    // is still connecting; after it, silence means its stream broke. This is per viewer, never
+    // global: the capture feed only runs while someone is watching, so a fresh viewer's opening
+    // silence is normal even when another viewer has been watching live video for an hour.
+    bool seen_live_frame = false;
+    // When live video last reached THIS viewer, so its silence is its own and never the feed's: a
+    // viewer that joins a camera someone else is already watching starts its own clock here.
+    std::chrono::steady_clock::time_point last_live_frame;
     std::chrono::steady_clock::time_point close_after;
 };
 
@@ -74,11 +91,15 @@ static int g_max_clients = 4;
 // the keepalive pong timeout and the Failed/Closed cleanup regardless of this value.
 static int g_session_timeout_s = 0;
 
-// Feed-liveness + placeholder cadence, touched only on the poll-loop thread (send_frame runs from
-// h264_stream_process in the main loop, the placeholder check runs right after), so no lock is
-// needed for these two; the per-client send still takes g_clients_mutex.
-static std::chrono::steady_clock::time_point g_last_feed_frame;
-static std::chrono::steady_clock::time_point g_last_placeholder;
+// Splash cadence, touched only on the poll-loop thread (the splash check runs right after
+// h264_stream_process in the main loop), so no lock is needed for it; the per-client send still
+// takes g_clients_mutex.
+static std::chrono::steady_clock::time_point g_last_splash;
+
+static long elapsed_ms(std::chrono::steady_clock::time_point since,
+                       std::chrono::steady_clock::time_point now) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now - since).count();
+}
 
 static std::shared_ptr<Client> find_client(const std::string& id) {
     std::lock_guard<std::mutex> lock(g_clients_mutex);
@@ -100,11 +121,11 @@ static bool has_clients() {
     return false;
 }
 
-static void send_to_client(const std::shared_ptr<Client>& client,
+static bool send_to_client(const std::shared_ptr<Client>& client,
                            std::chrono::steady_clock::time_point now,
                            const uint8_t *data, size_t size) {
     if (!client->video_track || !client->video_track->isOpen()) {
-        return;
+        return false;
     }
 
     try {
@@ -117,65 +138,158 @@ static void send_to_client(const std::shared_ptr<Client>& client,
             reinterpret_cast<const std::byte*>(data),
             reinterpret_cast<const std::byte*>(data + size));
         client->video_track->send(frame);
+        return true;
     } catch (...) {}
+
+    return false;
 }
 
-static void deliver_to_clients(const uint8_t *data, size_t size) {
-    std::lock_guard<std::mutex> lock(g_clients_mutex);
-    auto now = std::chrono::steady_clock::now();
-    for (auto& client : g_clients) {
-        // A client being deliberately closed must see ONLY its placeholder, not more live frames that
-        // would overwrite the message before teardown.
-        if (client->closing) {
+// A decoder can only start a picture on a keyframe. The camera sends one every couple of seconds, so
+// a viewer that arrives in between is handed frames that reference a picture it never received: it
+// has bytes, and it still has nothing to show. Only a keyframe means this viewer can see something.
+static const uint8_t H264_NAL_TYPE_MASK = 0x1F;
+static const uint8_t H264_NAL_TYPE_IDR = 5;
+static const uint8_t H264_NAL_TYPE_SPS = 7;
+
+static bool starts_nal_unit(const uint8_t *data, size_t index) {
+    return data[index] == 0 && data[index + 1] == 0 && data[index + 2] == 1;
+}
+
+static bool frame_carries_keyframe(const uint8_t *data, size_t size) {
+    for (size_t index = 0; index + 3 < size; ++index) {
+        if (!starts_nal_unit(data, index)) {
             continue;
         }
-        send_to_client(client, now, data, size);
+        uint8_t nal_type = data[index + 3] & H264_NAL_TYPE_MASK;
+        if (nal_type == H264_NAL_TYPE_IDR || nal_type == H264_NAL_TYPE_SPS) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void relay_frame_to(const std::shared_ptr<Client>& client,
+                           std::chrono::steady_clock::time_point now,
+                           const uint8_t *data, size_t size, bool carries_keyframe) {
+    // A client on its way out must see ONLY its splash, not more live frames that would overwrite
+    // the message before teardown.
+    if (client->closing) {
+        return;
+    }
+    if (!send_to_client(client, now, data, size)) {
+        return;
+    }
+    client->last_live_frame = now;
+    if (carries_keyframe) {
+        client->seen_live_frame = true;
     }
 }
 
+static bool any_client_awaits_first_picture() {
+    for (auto& client : g_clients) {
+        if (!client->seen_live_frame) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void send_frame(const uint8_t *data, size_t size) {
-    g_last_feed_frame = std::chrono::steady_clock::now();
-    deliver_to_clients(data, size);
+    std::lock_guard<std::mutex> lock(g_clients_mutex);
+    auto now = std::chrono::steady_clock::now();
+    // Reading the frame's own bytes answers the same question for every viewer at once, and once
+    // they all have a picture the answer changes nothing, so the frame is not read at all.
+    bool carries_keyframe = any_client_awaits_first_picture() && frame_carries_keyframe(data, size);
+    for (auto& client : g_clients) {
+        relay_frame_to(client, now, data, size, carries_keyframe);
+    }
 }
 
-static void send_placeholder() {
-    deliver_to_clients(placeholder_h264, placeholder_h264_len);
+enum class Splash { Quiet, Connecting, Interrupted };
+
+// A viewer still waiting for its first picture is watching a stream that has not started yet, which
+// is how every stream opens, so it is told the camera is connecting until GIVE_UP_CONNECTING_MS says
+// the camera is not coming at all.
+static Splash splash_while_connecting(long waited_ms) {
+    if (waited_ms >= GIVE_UP_CONNECTING_MS) {
+        return Splash::Interrupted;
+    }
+    return waited_ms >= CONNECTING_AFTER_SILENT_MS ? Splash::Connecting : Splash::Quiet;
 }
 
-// Called from ping_clients, which already holds g_clients_mutex, so it must not relock.
-static void send_placeholder_to(const std::shared_ptr<Client>& client) {
-    send_to_client(client, std::chrono::steady_clock::now(),
-                   placeholder_h264, placeholder_h264_len);
+// The splash this viewer belongs in front of, or Quiet while its gap is too short to say anything.
+// A viewer that has had live video is watching a stream that broke, so it gets the interrupted
+// message and its offer to refresh; every judgement is made from that viewer's own history, so a
+// fresh viewer is never told to refresh a page that is simply not ready yet.
+static Splash splash_for_viewer(const std::shared_ptr<Client>& client,
+                                std::chrono::steady_clock::time_point now) {
+    if (!client->seen_live_frame) {
+        return splash_while_connecting(elapsed_ms(client->start_time, now));
+    }
+    return elapsed_ms(client->last_live_frame, now) >= INTERRUPTED_AFTER_SILENT_MS
+        ? Splash::Interrupted
+        : Splash::Quiet;
 }
 
-// While viewers are connected but the live feed has gone silent past the stall threshold, resend the
-// placeholder keyframe on a steady cadence so the tile carries the interrupted message (and a viewer
-// that connects mid-stall still gets a keyframe) instead of a frozen frame. send_frame stamps
-// g_last_feed_frame on every real frame, so this stops the moment the feed recovers.
-static void maybe_send_placeholder() {
+// Called with g_clients_mutex held (ping_clients and deliver_splashes both hold it).
+static void send_splash_kind(const std::shared_ptr<Client>& client,
+                             std::chrono::steady_clock::time_point now, Splash splash) {
+    if (splash == Splash::Connecting) {
+        send_to_client(client, now, connecting_h264, connecting_h264_len);
+        return;
+    }
+    send_to_client(client, now, interrupted_h264, interrupted_h264_len);
+}
+
+static void send_splash_to(const std::shared_ptr<Client>& client,
+                           std::chrono::steady_clock::time_point now) {
+    Splash splash = splash_for_viewer(client, now);
+    if (splash == Splash::Quiet) {
+        return;
+    }
+    send_splash_kind(client, now, splash);
+}
+
+// A stream being torn down really has ended, so the goodbye always carries the interrupted message
+// and its offer to refresh, never silence and never a promise that it is still connecting.
+static void send_closing_splash_to(const std::shared_ptr<Client>& client,
+                                   std::chrono::steady_clock::time_point now) {
+    send_splash_kind(client, now, Splash::Interrupted);
+}
+
+static void deliver_splashes() {
+    std::lock_guard<std::mutex> lock(g_clients_mutex);
+    auto now = std::chrono::steady_clock::now();
+    for (auto& client : g_clients) {
+        // a closing client is already being sent its own splash on the flush cadence
+        if (!client->closing) {
+            send_splash_to(client, now);
+        }
+    }
+}
+
+// Run on a steady cadence while anyone is watching: each viewer that has been without picture long
+// enough gets its splash keyframe resent, so its tile carries a message instead of a frozen frame,
+// and a viewer whose video is flowing gets Quiet and is left alone.
+static void maybe_send_splash() {
     if (!has_clients()) {
         return;
     }
     auto now = std::chrono::steady_clock::now();
-    auto since_feed = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_last_feed_frame).count();
-    if (since_feed < PLACEHOLDER_AFTER_MS) {
+    if (elapsed_ms(g_last_splash, now) < SPLASH_RESEND_MS) {
         return;
     }
-    auto since_placeholder = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_last_placeholder).count();
-    if (since_placeholder < PLACEHOLDER_RESEND_MS) {
-        return;
-    }
-    g_last_placeholder = now;
-    send_placeholder();
+    g_last_splash = now;
+    deliver_splashes();
 }
 
-// Begin a graceful, message-carrying close: show the placeholder and schedule the real teardown for
-// PLACEHOLDER_FLUSH_MS later. Until then the client is `closing`, so it gets no more live frames, only
-// the placeholder (resent below), and the keyframe has time to reach the browser before we close.
+// Begin a graceful, message-carrying close: show the splash and schedule the real teardown for
+// SPLASH_FLUSH_MS later. Until then the client is `closing`, so it gets no more live frames, only
+// the splash (resent below), and the keyframe has time to reach the browser before we close.
 static void begin_close(const std::shared_ptr<Client>& c, std::chrono::steady_clock::time_point now) {
     c->closing = true;
-    c->close_after = now + std::chrono::milliseconds(PLACEHOLDER_FLUSH_MS);
-    send_placeholder_to(c);
+    c->close_after = now + std::chrono::milliseconds(SPLASH_FLUSH_MS);
+    send_closing_splash_to(c, now);
 }
 
 static void advance_close(const std::shared_ptr<Client>& c, std::chrono::steady_clock::time_point now) {
@@ -183,7 +297,7 @@ static void advance_close(const std::shared_ptr<Client>& c, std::chrono::steady_
         c->pc->close();
         return;
     }
-    send_placeholder_to(c);  // resend until teardown so a lost keyframe still lands first
+    send_closing_splash_to(c, now);  // resend until teardown so a lost keyframe still lands first
 }
 
 static void cleanup_clients() {
@@ -268,6 +382,7 @@ static std::shared_ptr<Client> create_client(const json& request) {
     client->id = std::to_string(++g_client_counter);
     client->start_time = std::chrono::steady_clock::now();
     client->last_pong = client->start_time;
+    client->last_live_frame = client->start_time;
 
     rtc::Configuration config;
     for (const auto& server : g_ice_servers) {
@@ -582,8 +697,7 @@ int main(int argc, char* argv[]) {
 
     log_printf("WebRTC server running...\n");
 
-    g_last_feed_frame = std::chrono::steady_clock::now();
-    g_last_placeholder = g_last_feed_frame;
+    g_last_splash = std::chrono::steady_clock::now();
 
     while (g_running) {
         struct pollfd pfd[] = {
@@ -611,7 +725,7 @@ int main(int argc, char* argv[]) {
             h264_stream_close(&g_h264_stream);
         }
 
-        maybe_send_placeholder();
+        maybe_send_splash();
     }
 
     log_printf("Shutting down...\n");

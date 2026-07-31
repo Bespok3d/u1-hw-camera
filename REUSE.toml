@@ -35,3 +35,19 @@ path = "plugin/files/html/**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "The v4l2-mpp authors"
 SPDX-License-Identifier = "GPL-3.0-or-later"
+
+# The two splash screens are ours, not v4l2-mpp's: `assets/generate-splash.sh` renders them here and
+# into the vendored tree next to the pages that display them. This block is last so it wins over the
+# two v4l2-mpp blocks above, which would otherwise sweep them up by path.
+[[annotations]]
+path = [
+  "plugin/files/html/connecting.jpg",
+  "plugin/files/html/interrupted.jpg",
+  "src/v4l2-mpp/apps/stream-http/html/connecting.jpg",
+  "src/v4l2-mpp/apps/stream-http/html/interrupted.jpg",
+  "src/v4l2-mpp/apps/stream-webrtc/connecting_h264.h",
+  "src/v4l2-mpp/apps/stream-webrtc/interrupted_h264.h",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (C) 2026 unlucio and the Bespok3d contributors"
+SPDX-License-Identifier = "GPL-3.0-only"

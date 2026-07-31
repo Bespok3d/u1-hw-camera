@@ -23,6 +23,59 @@ WEBRTC_SESSION_TIMEOUT_S=$((WEBRTC_SESSION_TIMEOUT_MIN * 60))
 CMD_FAKE_SERVICE="$BIN/fake-service"
 CMD_FAKE_SERVICE_ARGS="--retry 3"
 
+# A pidfile that outlives its process is a trap. start-stop-daemon -S reads it, finds that number
+# still alive, concludes the service is already up and starts nothing, which leaves the camera with
+# stream servers and no capture behind them. So a stop waits for the process to really be gone and
+# takes the pidfile with it, and a start drops a pidfile whose process has already died.
+STOP_WAIT_TRIES=10
+
+# Every signal goes through the program match as well as the number: a pidfile left behind long
+# enough names whatever process the kernel handed that number to next, and a stop must never signal
+# a stranger. A bare kill on a stale number is how a stop takes Klipper down with it.
+signal_the_service() {
+    stop_signal=$1
+    service_pidfile=$2
+    service_program=$3
+    start-stop-daemon -K -q -s "$stop_signal" -p "$service_pidfile" -x "$service_program" \
+        2>/dev/null || true
+    return 0
+}
+
+wait_for_pidfile_process_to_exit() {
+    waited_pidfile=$1
+    exiting_pid="$(cat "$waited_pidfile" 2>/dev/null)"
+    exit_tries=0
+    while [ -n "$exiting_pid" ] && [ "$exit_tries" -lt "$STOP_WAIT_TRIES" ] \
+        && kill -0 "$exiting_pid" 2>/dev/null; do
+        sleep 1
+        exit_tries=$((exit_tries + 1))
+    done
+    return 0
+}
+
+stop_service_and_clear_pidfile() {
+    service_name=$1
+    service_pidfile=$2
+    service_program=$3
+    printf "Stopping %s: " "$service_name"
+    signal_the_service TERM "$service_pidfile" "$service_program"
+    wait_for_pidfile_process_to_exit "$service_pidfile"
+    # It ignored the polite signal for long enough. The camera device it holds matters more.
+    signal_the_service KILL "$service_pidfile" "$service_program"
+    rm -f "$service_pidfile"
+    echo "OK"
+}
+
+clear_pidfile_of_dead_process() {
+    starting_pidfile=$1
+    leftover_pid="$(cat "$starting_pidfile" 2>/dev/null)"
+    if [ -n "$leftover_pid" ] && kill -0 "$leftover_pid" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$starting_pidfile"
+    return 0
+}
+
 CMD_CAPTURE="$BIN/capture-v4l2-jpeg-mpp --device $DEVICE --jpeg-sock /tmp/capture-${DEV_ID}-jpeg.sock --mjpeg-sock /tmp/capture-${DEV_ID}-mjpeg.sock --h264-sock /tmp/capture-${DEV_ID}-h264.sock"
 
 CMD_WEBRTC="$BIN/stream-webrtc --h264-sock /tmp/capture-${DEV_ID}-h264.sock --webrtc-sock /tmp/capture-${DEV_ID}-webrtc.sock --session-timeout-s $WEBRTC_SESSION_TIMEOUT_S"
@@ -36,6 +89,7 @@ start() {
     umask 0022
 
     printf "Starting capture-usb (%s): " "$DEV_ID"
+    clear_pidfile_of_dead_process "$RUN/capture-${DEV_ID}-mpp.pid"
     start-stop-daemon -S -b -q -m -p $RUN/capture-${DEV_ID}-mpp.pid \
         -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS $CMD_CAPTURE
     echo "OK"
@@ -50,6 +104,7 @@ start() {
     WEBRTC_SOCK_ARG=""
     if [ "$WEBRTC_ENABLED" = "1" ]; then
         printf "Starting stream-webrtc-usb (%s): " "$DEV_ID"
+        clear_pidfile_of_dead_process "$RUN/stream-${DEV_ID}-webrtc.pid"
         start-stop-daemon -S -b -q -m -p $RUN/stream-${DEV_ID}-webrtc.pid \
             -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS $CMD_WEBRTC
         echo "OK"
@@ -59,6 +114,7 @@ start() {
     CTRL_SOCK_ARG=""
     if [ -d $BESPOK3D/usr/local/plugins/camera-controls ]; then
         printf "Starting control-v4l2-usb (%s): " "$DEV_ID"
+        clear_pidfile_of_dead_process "$RUN/control-${DEV_ID}-v4l2.pid"
         start-stop-daemon -S -b -q -m -p $RUN/control-${DEV_ID}-v4l2.pid \
             -x /usr/bin/python3 -- "$CTRL_BIN/control-v4l2.py" \
             --device "$DEVICE" --sock /tmp/v4l2-control-${DEV_ID}.sock
@@ -67,6 +123,7 @@ start() {
     fi
 
     printf "Starting camera-stream-usb (%s): " "$DEV_ID"
+    clear_pidfile_of_dead_process "$RUN/stream-${DEV_ID}-http.pid"
     start-stop-daemon -S -b -q -m -p $RUN/stream-${DEV_ID}-http.pid \
         -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS \
         /usr/bin/python3 $BIN/camera-stream.py \
@@ -81,19 +138,11 @@ start() {
 }
 
 stop() {
-    for pair in "stream-http-usb:$RUN/stream-${DEV_ID}-http.pid" \
-                "stream-webrtc-usb:$RUN/stream-${DEV_ID}-webrtc.pid" \
-                "capture-usb:$RUN/capture-${DEV_ID}-mpp.pid"; do
-        name="${pair%%:*}"
-        pidfile="${pair##*:}"
-        printf "Stopping %s (%s): " "$name" "$DEV_ID"
-        start-stop-daemon -K -q -p "$pidfile" 2>/dev/null || true
-        echo "OK"
-    done
+    stop_service_and_clear_pidfile "stream-http-usb ($DEV_ID)" "$RUN/stream-${DEV_ID}-http.pid" "$CMD_FAKE_SERVICE"
+    stop_service_and_clear_pidfile "stream-webrtc-usb ($DEV_ID)" "$RUN/stream-${DEV_ID}-webrtc.pid" "$CMD_FAKE_SERVICE"
+    stop_service_and_clear_pidfile "capture-usb ($DEV_ID)" "$RUN/capture-${DEV_ID}-mpp.pid" "$CMD_FAKE_SERVICE"
     if [ -d $BESPOK3D/usr/local/plugins/camera-controls ]; then
-        printf "Stopping control-v4l2-usb (%s): " "$DEV_ID"
-        start-stop-daemon -K -q -p $RUN/control-${DEV_ID}-v4l2.pid 2>/dev/null || true
-        echo "OK"
+        stop_service_and_clear_pidfile "control-v4l2-usb ($DEV_ID)" "$RUN/control-${DEV_ID}-v4l2.pid" /usr/bin/python3
     fi
 }
 

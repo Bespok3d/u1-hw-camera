@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.10
+
+- A camera tile that is still starting up now says **"Connecting..."** instead of flashing the
+  "Stream interrupted" message and asking you to refresh a page that was never ready. The interrupted
+  message is unchanged and still appears the moment a stream you were actually watching stops. A tile
+  that never receives any picture gives up after 30 seconds and shows the interrupted message, so a
+  camera that is genuinely absent still tells you so.
+- Updating the plugin no longer leaves a camera with nothing reading it behind the picture servers.
+  Stopping a camera returned before its parts had actually exited, and left behind records saying
+  they were still running, so the next start ran against a camera that could still be held and
+  against records it could not trust. Both cameras now wait for every part to really be gone and
+  clear its record, and a start throws away a record whose process has already died.
+- A camera stop now only ever signals the camera's own processes, so a record left behind can never
+  make the printer signal something else.
+
 ## 0.1.9
 
 - Licensing only, nothing about how the plugin works has changed. The files it installs that came

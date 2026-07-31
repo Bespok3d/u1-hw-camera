@@ -36,6 +36,8 @@ lmd_stop() {
     else
         killall -9 unisrv lmd rkaiq_3A_ 2>/dev/null
     fi
+    # lmd is killed by name, not through its pidfile, so nothing else would ever clear it.
+    rm -f $RUN/unisrv.pid
 }
 
 lmd_verify_rearm() {
@@ -46,6 +48,59 @@ lmd_verify_rearm() {
 
 CMD_FAKE_SERVICE="$BIN/fake-service"
 CMD_FAKE_SERVICE_ARGS="--retry 3"
+
+# A pidfile that outlives its process is a trap. start-stop-daemon -S reads it, finds that number
+# still alive, concludes the service is already up and starts nothing, which leaves the camera with
+# stream servers and no capture behind them. So a stop waits for the process to really be gone and
+# takes the pidfile with it, and a start drops a pidfile whose process has already died.
+STOP_WAIT_TRIES=10
+
+# Every signal goes through the program match as well as the number: a pidfile left behind long
+# enough names whatever process the kernel handed that number to next, and a stop must never signal
+# a stranger. A bare kill on a stale number is how a stop takes Klipper down with it.
+signal_the_service() {
+    stop_signal=$1
+    service_pidfile=$2
+    service_program=$3
+    start-stop-daemon -K -q -s "$stop_signal" -p "$service_pidfile" -x "$service_program" \
+        2>/dev/null || true
+    return 0
+}
+
+wait_for_pidfile_process_to_exit() {
+    waited_pidfile=$1
+    exiting_pid="$(cat "$waited_pidfile" 2>/dev/null)"
+    exit_tries=0
+    while [ -n "$exiting_pid" ] && [ "$exit_tries" -lt "$STOP_WAIT_TRIES" ] \
+        && kill -0 "$exiting_pid" 2>/dev/null; do
+        sleep 1
+        exit_tries=$((exit_tries + 1))
+    done
+    return 0
+}
+
+stop_service_and_clear_pidfile() {
+    service_name=$1
+    service_pidfile=$2
+    service_program=$3
+    printf "Stopping %s: " "$service_name"
+    signal_the_service TERM "$service_pidfile" "$service_program"
+    wait_for_pidfile_process_to_exit "$service_pidfile"
+    # It ignored the polite signal for long enough. The camera device it holds matters more.
+    signal_the_service KILL "$service_pidfile" "$service_program"
+    rm -f "$service_pidfile"
+    echo "OK"
+}
+
+clear_pidfile_of_dead_process() {
+    starting_pidfile=$1
+    leftover_pid="$(cat "$starting_pidfile" 2>/dev/null)"
+    if [ -n "$leftover_pid" ] && kill -0 "$leftover_pid" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$starting_pidfile"
+    return 0
+}
 
 CMD_CAPTURE="$BIN/capture-v4l2-raw-mpp --device /dev/video11 --format nv12 --jpeg-quality 7 --jpeg-sock /tmp/capture-mipi-jpeg.sock --mjpeg-sock /tmp/capture-mipi-mjpeg.sock --h264-sock /tmp/capture-mipi-h264.sock --raw-frame-sock /tmp/capture-mipi-raw.sock --width $CAM_WIDTH --height $CAM_HEIGHT --fps 30"
 
@@ -64,6 +119,7 @@ start() {
     lmd_stop
 
     printf "Starting capture-mipi: "
+    clear_pidfile_of_dead_process "$RUN/capture-mipi-mpp.pid"
     start-stop-daemon -S -b -q -m -p $RUN/capture-mipi-mpp.pid \
         -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS $CMD_CAPTURE
     echo "OK"
@@ -78,6 +134,7 @@ start() {
     WEBRTC_SOCK_ARG=""
     if [ "$WEBRTC_ENABLED" = "1" ]; then
         printf "Starting stream-webrtc: "
+        clear_pidfile_of_dead_process "$RUN/stream-mipi-webrtc.pid"
         start-stop-daemon -S -b -q -m -p $RUN/stream-mipi-webrtc.pid \
             -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS $CMD_WEBRTC
         echo "OK"
@@ -87,6 +144,7 @@ start() {
     CTRL_SOCK_ARG=""
     if [ -d $BESPOK3D/usr/local/plugins/camera-controls ]; then
         printf "Starting control-v4l2: "
+        clear_pidfile_of_dead_process "$RUN/control-mipi-v4l2.pid"
         start-stop-daemon -S -b -q -m -p $RUN/control-mipi-v4l2.pid \
             -x /usr/bin/python3 -- "$CTRL_BIN/control-v4l2.py" \
             --device /dev/v4l-subdev2 --sock /tmp/v4l2-control-mipi.sock \
@@ -96,6 +154,7 @@ start() {
     fi
 
     printf "Starting camera-stream: "
+    clear_pidfile_of_dead_process "$RUN/stream-mipi-http.pid"
     start-stop-daemon -S -b -q -m -p $RUN/stream-mipi-http.pid \
         -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS \
         /usr/bin/python3 $BIN/camera-stream.py \
@@ -116,6 +175,7 @@ start() {
         export V4L2_IMPOSTER_HEIGHT=1080
         export V4L2_IMPOSTER_FORMAT=nv12
         printf "Starting lmd: "
+        clear_pidfile_of_dead_process "$RUN/unisrv.pid"
         start-stop-daemon -S -b -q -m -p $RUN/unisrv.pid -x /usr/bin/lmd
         echo "OK"
     )
@@ -127,19 +187,11 @@ stop() {
     printf "Stopping lmd: "
     lmd_stop
     echo "OK"
-    for pair in "stream-http:$RUN/stream-mipi-http.pid" \
-                "stream-webrtc:$RUN/stream-mipi-webrtc.pid" \
-                "capture-mipi:$RUN/capture-mipi-mpp.pid"; do
-        name="${pair%%:*}"
-        pidfile="${pair##*:}"
-        printf "Stopping %s: " "$name"
-        start-stop-daemon -K -q -p "$pidfile" 2>/dev/null || true
-        echo "OK"
-    done
+    stop_service_and_clear_pidfile "stream-http" "$RUN/stream-mipi-http.pid" "$CMD_FAKE_SERVICE"
+    stop_service_and_clear_pidfile "stream-webrtc" "$RUN/stream-mipi-webrtc.pid" "$CMD_FAKE_SERVICE"
+    stop_service_and_clear_pidfile "capture-mipi" "$RUN/capture-mipi-mpp.pid" "$CMD_FAKE_SERVICE"
     if [ -d $BESPOK3D/usr/local/plugins/camera-controls ]; then
-        printf "Stopping control-v4l2: "
-        start-stop-daemon -K -q -p $RUN/control-mipi-v4l2.pid 2>/dev/null || true
-        echo "OK"
+        stop_service_and_clear_pidfile "control-v4l2" "$RUN/control-mipi-v4l2.pid" /usr/bin/python3
     fi
 }
 

@@ -25,15 +25,20 @@ MJPEG_SEND_TIMEOUT_MS = 10000
 # A long-lived MJPEG response must survive a capture-side hiccup: the capture binary can briefly
 # stop feeding our one connection (or drop it after its own slow-client timeout), and a plain
 # `<img>` stream does not reconnect, so the viewer freezes until a manual refresh. We give the
-# capture-socket read a timeout and, on a stall, reconnect internally and keep streaming. A stall
-# longer than STALL_PLACEHOLDER_S surfaces a "stream interrupted" placeholder frame while the
-# response stays open, so the tile shows a clear message instead of a frozen image and resumes live
-# frames the moment the capture recovers.
+# capture-socket read a timeout and, on a stall, reconnect internally and keep streaming. While the
+# capture is silent the response stays open and carries a splash image instead of a frozen tile, and
+# resumes live frames the moment the capture recovers.
+#
+# WHICH splash depends on the viewer, not on the camera: the capture feed only starts when someone
+# is watching, so the first seconds of every stream are silent by design. A viewer still waiting for
+# its first frame is told the camera is connecting; only a viewer whose live video stopped, or one
+# that waited GIVE_UP_CONNECTING_S and never saw a frame, is told the stream was interrupted and to
+# refresh.
 CAPTURE_READ_TIMEOUT_S = 2.0
 RECONNECT_BACKOFF_S = 0.5
-STALL_PLACEHOLDER_S = 5.0
-
-PLACEHOLDER_FILENAME = 'placeholder.jpg'
+CONNECTING_AFTER_SILENT_S = 2.0
+INTERRUPTED_AFTER_SILENT_S = 5.0
+GIVE_UP_CONNECTING_S = 30.0
 
 JPEG_SOI = b'\xff\xd8'
 JPEG_EOI = b'\xff\xd9'
@@ -43,7 +48,14 @@ FRAME_DROP = 'drop'
 FRAME_STALE = 'stale'
 
 CAPTURE_FRAME = 'frame'
-CAPTURE_STALLED = 'stalled'
+CAPTURE_CONNECTING = 'connecting'
+CAPTURE_INTERRUPTED = 'interrupted'
+CAPTURE_QUIET = 'quiet'
+
+SPLASH_FILENAMES = {
+    CAPTURE_CONNECTING: 'connecting.jpg',
+    CAPTURE_INTERRUPTED: 'interrupted.jpg',
+}
 
 
 def log(msg):
@@ -154,23 +166,39 @@ def socket_req_and_resp(sock_path, request):
         sock.close()
 
 
+def splash_for_silence(silent_for, seen_live_frame):
+    """Which splash a viewer belongs in front of after `silent_for` seconds without a live frame,
+    or CAPTURE_QUIET while the gap is too short to say anything.
+
+    A viewer that has already seen live video is watching a stream that broke: it gets the
+    interrupted message and its offer to refresh. A viewer still waiting for its first frame is
+    watching one that has not started yet, which is the normal opening of every stream, so it gets
+    the connecting message until GIVE_UP_CONNECTING_S says the camera is not coming at all.
+    """
+    if seen_live_frame:
+        return CAPTURE_INTERRUPTED if silent_for >= INTERRUPTED_AFTER_SILENT_S else CAPTURE_QUIET
+    if silent_for >= GIVE_UP_CONNECTING_S:
+        return CAPTURE_INTERRUPTED
+    return CAPTURE_CONNECTING if silent_for >= CONNECTING_AFTER_SILENT_S else CAPTURE_QUIET
+
+
 class CaptureStream:
     """JPEG frames from a capture unix socket, transparently reconnecting across capture-side stalls
     so a brief producer hiccup never ends the viewer's MJPEG response. `frames()` yields a
-    (CAPTURE_FRAME, jpeg) for each real frame and a (CAPTURE_STALLED, None) signal once the capture
-    has been frameless past STALL_PLACEHOLDER_S (repeated each reconnect cycle while it stays down),
-    so the caller can surface a placeholder while the response stays open. It keeps reconnecting and
-    only stops when the consumer stops reading (the client is gone). `connect`/`monotonic`/`sleep`
-    are injectable so the reconnect behaviour is unit-testable.
+    (CAPTURE_FRAME, jpeg) for each real frame and, while the capture is silent, a
+    (CAPTURE_CONNECTING, None) or (CAPTURE_INTERRUPTED, None) signal per reconnect cycle, so the
+    caller can surface the matching splash while the response stays open. One CaptureStream serves
+    one viewer, so the choice between the two follows that viewer's own history: see
+    `splash_for_silence`. It keeps reconnecting and only stops when the consumer stops reading (the
+    client is gone). `connect`/`monotonic`/`sleep` are injectable so the reconnect behaviour is
+    unit-testable.
     """
 
-    def __init__(self, sock_path, connect=None, monotonic=time.monotonic, sleep=time.sleep,
-                 stall_after_s=STALL_PLACEHOLDER_S):
+    def __init__(self, sock_path, connect=None, monotonic=time.monotonic, sleep=time.sleep):
         self.sock_path = sock_path
         self._connect = connect or self._default_connect
         self._monotonic = monotonic
         self._sleep = sleep
-        self.stall_after_s = stall_after_s
 
     def _default_connect(self):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -189,24 +217,29 @@ class CaptureStream:
         self._sleep(RECONNECT_BACKOFF_S)
         return self._open()
 
-    def _stall_signal(self, last_frame_at):
-        if self._monotonic() - last_frame_at >= self.stall_after_s:
-            yield (CAPTURE_STALLED, None)
+    def _splash_signal(self, silent_since, seen_live_frame):
+        splash = splash_for_silence(self._monotonic() - silent_since, seen_live_frame)
+        if splash != CAPTURE_QUIET:
+            yield (splash, None)
 
     def frames(self):
         buffer = b''
         sock = self._open()
-        last_frame_at = self._monotonic()
+        # before the first frame this is when the viewer started waiting, after it the last frame's
+        # arrival: either way, how long this viewer has been looking at no live video.
+        silent_since = self._monotonic()
+        seen_live_frame = False
         try:
             while True:
                 chunk = read_chunk(sock)
                 if chunk is None:
-                    yield from self._stall_signal(last_frame_at)
+                    yield from self._splash_signal(silent_since, seen_live_frame)
                     sock = self._reopen(sock)
                     continue
                 complete, buffer = extract_jpeg_frames(buffer + chunk)
                 if complete:
-                    last_frame_at = self._monotonic()
+                    silent_since = self._monotonic()
+                    seen_live_frame = True
                 yield from ((CAPTURE_FRAME, frame) for frame in complete)
         finally:
             close_quietly(sock)
@@ -249,7 +282,7 @@ class CameraHandler(SimpleHTTPRequestHandler):
     webrtc_sock = None
     control_sock = None
     html_dir = None
-    placeholder_jpeg = b''
+    splash_jpegs = dict.fromkeys(SPLASH_FILENAMES, b'')
 
     def log_message(self, format, *args):
         log(f"HTTP {self.address_string()} - {format % args}")
@@ -313,8 +346,10 @@ class CameraHandler(SimpleHTTPRequestHandler):
             log(f"JPEG client disconnected: {e}")
 
     def handle_snapshot(self):
+        # A snapshot is one shot with no second chance, so there is no connecting phase to report:
+        # either the camera hands over a frame now or the answer is that the stream is not running.
         captured = self._read_one_jpeg() if self.jpeg_sock else b''
-        payload = captured or self.placeholder_jpeg
+        payload = captured or self.splash_jpegs[CAPTURE_INTERRUPTED]
         if not payload:
             self.send_error(503, 'Snapshot not available')
             return
@@ -349,11 +384,11 @@ class CameraHandler(SimpleHTTPRequestHandler):
         pacer.note_sent(len(frame), header_size)
 
     def _pump_mjpeg(self, capture, pacer):
-        # A stall signal carries no frame; relay the placeholder in its place (skipped only when
-        # the placeholder asset is missing) so the viewer sees the interrupted message, not a
-        # frozen one.
+        # A splash signal carries no frame; relay the image that carries its message in place of the
+        # frame (skipped only when that asset is missing), so the viewer reads what is happening
+        # instead of watching a frozen tile.
         for kind, frame in capture.frames():
-            payload = self.placeholder_jpeg if kind == CAPTURE_STALLED else frame
+            payload = frame if kind == CAPTURE_FRAME else self.splash_jpegs[kind]
             if payload:
                 self._relay_frame(payload, pacer)
 
@@ -427,21 +462,25 @@ def build_arg_parser(default_html_dir):
     return parser
 
 
-def load_placeholder(html_dir):
-    """The "stream interrupted" image shown when the capture is down. It ships beside the player
-    HTML (a committed, architecture-independent asset), so the html dir is also where we read it."""
-    path = os.path.join(html_dir, PLACEHOLDER_FILENAME)
+def load_splash(html_dir, filename):
+    """One splash image, shown in place of live video. They ship beside the player HTML (committed,
+    architecture-independent assets), so the html dir is also where we read them."""
+    path = os.path.join(html_dir, filename)
     try:
         with open(path, 'rb') as handle:
             return handle.read()
     except OSError:
-        log(f"placeholder image not found at {path}")
+        log(f"splash image not found at {path}")
         return b''
+
+
+def load_splashes(html_dir):
+    return {kind: load_splash(html_dir, filename) for kind, filename in SPLASH_FILENAMES.items()}
 
 
 def configure_handler(args):
     CameraHandler.html_dir = args.html_dir
-    CameraHandler.placeholder_jpeg = load_placeholder(args.html_dir)
+    CameraHandler.splash_jpegs = load_splashes(args.html_dir)
     CameraHandler.jpeg_sock = args.jpeg_sock
     CameraHandler.mjpeg_sock = args.mjpeg_sock
     CameraHandler.h264_sock = args.h264_sock

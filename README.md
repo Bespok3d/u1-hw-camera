@@ -36,13 +36,16 @@ Needs Node.js 20+, plus Docker for the binaries (they are arm64; the build runs
 the compiled binaries into `plugin/files/bin`, then packs:
 
 ```sh
-npm install github:Bespok3d/b3-builder
-npx b3-builder build --source ./plugin --atom-repo Bespok3d/u1-hw-camera --bake
+npm install --prefix ~/.b3-builder github:Bespok3d/b3-builder
+~/.b3-builder/node_modules/.bin/b3-builder build --source ./plugin --atom-repo Bespok3d/u1-hw-camera --bake
 # -> dist/camera-hw-accel-<ver>.b3 + dist/camera-hw-accel.atom.json
 ```
 
 The manifest symlinks `files/bin` onto the printer; `--bake` stages the compiled binaries there, so
-always build with it.
+always build with it. Two traps the commands above avoid: `npx b3-builder` resolves to whatever copy
+npm cached earlier, which silently builds against an out of date manifest schema, and a plain
+`npm install` run in this repo installs into the nearest `package.json` above it (this repo has none),
+which is why the install gets its own prefix directory.
 
 ## Releasing
 
