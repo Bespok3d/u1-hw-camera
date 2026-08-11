@@ -47,6 +47,9 @@ npm cached earlier, which silently builds against an out of date manifest schema
 `npm install` run in this repo installs into the nearest `package.json` above it (this repo has none),
 which is why the install gets its own prefix directory.
 
+Writing a plugin of your own? Start at the plugin documentation:
+[Bespok3d/b3-builder/doc](https://github.com/Bespok3d/b3-builder/tree/main/doc).
+
 ## Releasing
 
 Bump `plugin/manifest.json` `version` and push the tag `plugin-<name>-v<version>` naming that plugin
