@@ -119,7 +119,12 @@ start() {
     lmd_stop
 
     printf "Starting capture-mipi: "
+    # start-stop-daemon -b sends a background service's output to /dev/null, so the capture daemon is
+    # given a file of its own: it is the one that reports a frame dropped for a reader falling behind.
+    # Asked for in the environment, never as an option, so a fake-service too old to know about it
+    # ignores it and still starts the camera.
     clear_pidfile_of_dead_process "$RUN/capture-mipi-mpp.pid"
+    FAKE_SERVICE_LOG=$RUN/capture-mipi-mpp.log \
     start-stop-daemon -S -b -q -m -p $RUN/capture-mipi-mpp.pid \
         -x $CMD_FAKE_SERVICE -- $CMD_FAKE_SERVICE_ARGS $CMD_CAPTURE
     echo "OK"
@@ -171,9 +176,15 @@ start() {
         export LD_PRELOAD=$BIN/libv4l2-imposter.so
         export V4L2_IMPOSTER_SOCKET_PATH=/tmp/capture-mipi-raw.sock
         export V4L2_IMPOSTER_DEVICE=/dev/video11
-        export V4L2_IMPOSTER_WIDTH=1920
-        export V4L2_IMPOSTER_HEIGHT=1080
+        # The same size the capture is started at. The shim now measures every frame against it and
+        # drops one that arrives short, so a resolution that disagrees with the capture would reject
+        # every frame instead of merely mislabelling them.
+        export V4L2_IMPOSTER_WIDTH=$CAM_WIDTH
+        export V4L2_IMPOSTER_HEIGHT=$CAM_HEIGHT
         export V4L2_IMPOSTER_FORMAT=nv12
+        # lmd is started in the background with no terminal, so anything the shim writes to stderr is
+        # lost. This is where a dropped or a cut off frame becomes readable on the printer.
+        export V4L2_IMPOSTER_LOG=$RUN/v4l2-imposter.log
         printf "Starting lmd: "
         clear_pidfile_of_dead_process "$RUN/unisrv.pid"
         start-stop-daemon -S -b -q -m -p $RUN/unisrv.pid -x /usr/bin/lmd

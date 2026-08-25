@@ -87,6 +87,13 @@ def test_a_stop_waits_for_the_process_to_go_and_takes_the_pidfile_with_it(tmp_pa
     assert still_alive.returncode != 0
 
 
+def first_line_of_command(lines, number):
+    """A command can begin on an earlier line, so walk back over the lines it is continued from."""
+    while number > 0 and lines[number - 1].rstrip().endswith("\\"):
+        number -= 1
+    return number
+
+
 def test_both_cameras_clear_a_dead_pidfile_before_every_service_they_start():
     for script_name, text in INIT_SCRIPTS.items():
         lines = text.splitlines()
@@ -97,7 +104,7 @@ def test_both_cameras_clear_a_dead_pidfile_before_every_service_they_start():
         ]
         assert starts, script_name
         for number in starts:
-            guard = lines[number - 1]
+            guard = lines[first_line_of_command(lines, number) - 1]
             assert "clear_pidfile_of_dead_process" in guard, f"{script_name}:{number + 1}"
 
 

@@ -18,6 +18,39 @@ static volatile sig_atomic_t received_signal = 0;
 static volatile pid_t child_pid = 0;
 static bool use_syslog = false;
 
+#define LOG_MAX_BYTES (256 * 1024)
+
+/* Emptied rather than rotated: a camera daemon complaining thirty times a second would otherwise fill
+   the printer's flash. A stream that cannot say how long it is, such as a terminal, is left be. */
+static void log_empty_when_full(FILE *stream)
+{
+    long bytes_written = ftell(stream);
+
+    if (bytes_written < LOG_MAX_BYTES)
+        return;
+    if (ftruncate(fileno(stream), 0) != 0)
+        return;
+    rewind(stream);
+}
+
+/* Both streams are pointed at the same file so the supervisor's own words and the daemon's sit in one
+   readable place. A log that cannot be opened is not worth refusing to start the camera over.
+
+   Taken from the environment rather than a command line option: the init script that asks for a log
+   ships in the same package as this binary but is installed as text, so a package whose binaries were
+   not rebuilt would meet an option this program does not know and refuse to start the camera at all.
+   An unknown environment variable is ignored, and the camera runs without its log. */
+static void log_to_file(const char *log_path)
+{
+    if (freopen(log_path, "a", stdout) == NULL) {
+        fprintf(stderr, "Cannot write the log at %s: %s\n", log_path, strerror(errno));
+        return;
+    }
+    if (freopen(log_path, "a", stderr) == NULL)
+        return;
+    setvbuf(stdout, NULL, _IOLBF, 0);
+}
+
 static void write_timestamp(char *out, size_t out_size)
 {
     time_t now = time(NULL);
@@ -40,6 +73,7 @@ static void log_info(const char *format, ...)
         va_end(args);
     }
     fflush(stdout);
+    log_empty_when_full(stdout);
 }
 
 static void log_error(const char *format, ...)
@@ -57,6 +91,7 @@ static void log_error(const char *format, ...)
         va_end(args);
     }
     fflush(stderr);
+    log_empty_when_full(stderr);
 }
 
 static void signal_handler(int signum)
@@ -136,6 +171,9 @@ static void print_usage(const char *program_name)
     printf("  --syslog            Enable syslog logging\n");
     printf("  --help              Show this help\n");
     printf("\n");
+    printf("Environment:\n");
+    printf("  FAKE_SERVICE_LOG    Write this service's output to this file\n");
+    printf("\n");
     printf("Examples:\n");
     printf("  %s sleep 5\n", program_name);
     printf("  %s --retry 5 --syslog /path/to/program arg1 arg2\n", program_name);
@@ -151,6 +189,7 @@ int main(int argc, char *argv[])
     int child_argc = 0;
     struct sigaction signal_action;
     int option;
+    const char *log_path = getenv("FAKE_SERVICE_LOG");
 
     enum {
         OPT_RETRY = 1,
@@ -189,6 +228,10 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Error: No command specified\n");
         print_usage(argv[0]);
         return 1;
+    }
+
+    if (log_path != NULL) {
+        log_to_file(log_path);
     }
 
     if (use_syslog) {

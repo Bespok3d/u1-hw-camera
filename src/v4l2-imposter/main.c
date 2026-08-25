@@ -14,7 +14,17 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <poll.h>
+#include <time.h>
 #include <linux/videodev2.h>
+
+#include "frame_geometry.h"
+
+/* frame_geometry.h names the pixel formats itself so its arithmetic can be tested without kernel
+   headers. These hold those names to the kernel's own values. */
+_Static_assert(FRAME_FORMAT_NV12 == V4L2_PIX_FMT_NV12, "the NV12 fourcc drifted");
+_Static_assert(FRAME_FORMAT_YUYV == V4L2_PIX_FMT_YUYV, "the YUYV fourcc drifted");
+_Static_assert(FRAME_FORMAT_MJPEG == V4L2_PIX_FMT_MJPEG, "the MJPEG fourcc drifted");
+_Static_assert(FRAME_FORMAT_JPEG == V4L2_PIX_FMT_JPEG, "the JPEG fourcc drifted");
 
 #define MAX_BUFFERS 4
 #define MAX_BUFFER_SIZE (4 * 1024 * 1024)
@@ -23,9 +33,73 @@
 #define FOURCC_FMT "%c%c%c%c"
 
 #define LOG_PREFIX "[v4l2-mpp-injector] "
-#define LOG_DEBUG(fmt, ...) do { if (config_debug) fprintf(stderr, LOG_PREFIX "DEBUG[%d]: " fmt "\n", getpid(), ##__VA_ARGS__); } while(0)
-#define LOG_INFO(fmt, ...) fprintf(stderr, LOG_PREFIX "INFO[%d]: " fmt "\n", getpid(), ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, LOG_PREFIX "ERROR[%d]: " fmt "\n", getpid(), ##__VA_ARGS__)
+#define LOG_MAX_BYTES (256 * 1024)
+#define LOG_LINE_MAX 512
+
+/* The shim rides inside the printer's own video daemon, which is started in the background with no
+   terminal and no log of its own, so anything written to stderr goes nowhere. V4L2_IMPOSTER_LOG
+   names a file instead, which is the only way a dropped or a cut off frame is ever visible on the
+   printer. Until one is named, and if it cannot be opened, stderr stands. */
+static FILE *log_file = NULL;
+
+static FILE *log_destination(void)
+{
+    return log_file ? log_file : stderr;
+}
+
+/* Emptied rather than rotated: one frame going wrong at thirty frames a second would otherwise
+   fill the printer's flash. A stream that cannot say how long it is, such as stderr, is left be. */
+static void log_empty_when_full(FILE *stream)
+{
+    long bytes_written = ftell(stream);
+
+    if (bytes_written < LOG_MAX_BYTES)
+        return;
+    if (ftruncate(fileno(stream), 0) != 0)
+        return;
+    rewind(stream);
+}
+
+/* The shim runs inside a video daemon that has several threads, so the shared clock that
+   `localtime` hands back is not ours to hold. */
+static void clock_stamp_now(char *clock_stamp, size_t room)
+{
+    time_t logged_at = time(NULL);
+    struct tm logged_at_local;
+
+    if (localtime_r(&logged_at, &logged_at_local) == NULL) {
+        clock_stamp[0] = '\0';
+        return;
+    }
+    strftime(clock_stamp, room, "[%H:%M:%S]", &logged_at_local);
+}
+
+/* Built whole and written once: several threads write here, and a line assembled in pieces comes
+   out with another thread's line spliced through the middle of it. The declaration carries the
+   printf attribute, so the compiler still checks what every caller passes now that none of them
+   calls fprintf itself. */
+static void log_line(const char *level, const char *format, ...)
+    __attribute__((format(printf, 2, 3)));
+
+static void log_line(const char *level, const char *format, ...)
+{
+    FILE *stream = log_destination();
+    char clock_stamp[16];
+    char message[LOG_LINE_MAX];
+    va_list args;
+
+    clock_stamp_now(clock_stamp, sizeof(clock_stamp));
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    fprintf(stream, "%s " LOG_PREFIX "%s[%d]: %s\n", clock_stamp, level, getpid(), message);
+    fflush(stream);
+    log_empty_when_full(stream);
+}
+
+#define LOG_DEBUG(fmt, ...) do { if (config_debug) log_line("DEBUG", fmt, ##__VA_ARGS__); } while(0)
+#define LOG_INFO(fmt, ...) log_line("INFO", fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) log_line("ERROR", fmt, ##__VA_ARGS__)
 
 static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 static int initialized = 0;
@@ -90,6 +164,13 @@ static bool load_config(void)
     }
 
     initialized = 1;
+
+    value = getenv("V4L2_IMPOSTER_LOG");
+    if (value && strlen(value) > 0) {
+        log_file = fopen(value, "a");
+        if (log_file == NULL)
+            LOG_ERROR("Cannot write the log at %s: %s", value, strerror(errno));
+    }
 
     value = getenv("V4L2_IMPOSTER_DEBUG");
     if (value && atoi(value))
@@ -293,9 +374,15 @@ static ssize_t read_fully(int fd, void *dest, size_t count, int timeout_ms)
 static int fetch_frame(buffer_t *buffer)
 {
     ssize_t frame_bytes;
+    size_t expected_frame_bytes;
     int sock_fd;
     struct timespec start_time, end_time;
     clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    /* Cleared before the read, so a frame that does not arrive whole is reported as no frame at all.
+       The picture behind it stays in the buffer, and a length left over from it is what hands the
+       printer's video stack the tail of the previous frame stitched onto a cut off one. */
+    buffer->bytes_used = 0;
 
     sock_fd = connect_to_socket();
     if (sock_fd < 0)
@@ -312,8 +399,12 @@ static int fetch_frame(buffer_t *buffer)
         LOG_ERROR("No data received");
         return -1;
     }
-    if ((size_t)frame_bytes > buffer->size) {
-        LOG_ERROR("Frame size %zd exceeds buffer size %zu", frame_bytes, buffer->size);
+    /* A picture of a known size that arrives short was cut off in the middle, whatever the reason:
+       the producer dropped the connection, or it was closed under a busy printer. It is dropped
+       whole rather than passed on half drawn. */
+    expected_frame_bytes = whole_frame_bytes(config_format, config_width, config_height);
+    if (!frame_read_is_whole(expected_frame_bytes, (size_t)frame_bytes)) {
+        LOG_ERROR("Cut off frame: %zd bytes of %zu, dropped", frame_bytes, expected_frame_bytes);
         return -1;
     }
 
@@ -373,12 +464,14 @@ static int handle_g_fmt(struct v4l2_format *format)
     format->fmt.pix.height = config_height;
     format->fmt.pix.pixelformat = config_format;
     format->fmt.pix.field = V4L2_FIELD_NONE;
-    format->fmt.pix.bytesperline = 0;
-    format->fmt.pix.sizeimage = config_width * config_height * 2;
-    if (format->fmt.pix.sizeimage > MAX_BUFFER_SIZE) {
+    size_t frame_buffer_bytes = capture_buffer_bytes(config_format, config_width, config_height);
+
+    if (frame_buffer_bytes > MAX_BUFFER_SIZE) {
         LOG_ERROR("G_FMT: sizeimage overflow");
         return -EINVAL;
     }
+    format->fmt.pix.bytesperline = (uint32_t)frame_bytes_per_line(config_format, config_width);
+    format->fmt.pix.sizeimage = (uint32_t)frame_buffer_bytes;
     format->fmt.pix.colorspace = V4L2_COLORSPACE_JPEG;
     LOG_DEBUG("G_FMT: %dx%d fmt=" FOURCC_FMT, config_width, config_height, FOURCC_ARGS(config_format));
     return 0;
@@ -405,12 +498,14 @@ static int handle_s_fmt(struct v4l2_format *format)
     }
 
     format->fmt.pix.field = V4L2_FIELD_NONE;
-    format->fmt.pix.bytesperline = 0;
-    format->fmt.pix.sizeimage = config_width * config_height * 2;
-    if (format->fmt.pix.sizeimage > MAX_BUFFER_SIZE) {
+    size_t frame_buffer_bytes = capture_buffer_bytes(config_format, config_width, config_height);
+
+    if (frame_buffer_bytes > MAX_BUFFER_SIZE) {
         LOG_ERROR("S_FMT: sizeimage overflow");
         return -EINVAL;
     }
+    format->fmt.pix.bytesperline = (uint32_t)frame_bytes_per_line(config_format, config_width);
+    format->fmt.pix.sizeimage = (uint32_t)frame_buffer_bytes;
     format->fmt.pix.colorspace = V4L2_COLORSPACE_JPEG;
     LOG_DEBUG("S_FMT: %dx%d fmt=" FOURCC_FMT, config_width, config_height, FOURCC_ARGS(config_format));
     return 0;
@@ -438,7 +533,7 @@ static int handle_reqbufs(struct v4l2_requestbuffers *request)
     if (request->count > MAX_BUFFERS)
         request->count = MAX_BUFFERS;
 
-    buffer_size = config_width * config_height * 2;
+    buffer_size = capture_buffer_bytes(config_format, config_width, config_height);
     if (buffer_size > MAX_BUFFER_SIZE) {
         LOG_ERROR("REQBUFS: buffer size overflow");
         return -EINVAL;

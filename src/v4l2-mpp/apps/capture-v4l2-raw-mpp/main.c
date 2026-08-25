@@ -286,6 +286,10 @@ int main(int argc, char *argv[])
         log_errorf( "Failed to open raw socket\n");
         goto error;
     }
+    /* The printer's own video stack reads this one. A raw frame is far larger than the socket can
+       hold, so a reader that falls behind has to lose the frame whole: writing into it anyway ends
+       at the write timeout with half a picture delivered. */
+    raw_frame_sock.allow_drops = true;
 
     if (v4l2_capture_start(&v4l2) < 0) {
         log_errorf( "Failed to start V4L2 streaming\n");

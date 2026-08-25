@@ -5,8 +5,10 @@
 #include <stdbool.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <linux/sockios.h>
 #include <time.h>
+#include "frame_backlog.h"
 #include "log.h"
 
 #define SOCK_MAX_CLIENTS 8
@@ -15,7 +17,6 @@
 
 typedef struct {
     int fd;
-    size_t last_size;
     struct timespec last_time;
     int num_frames;
     int num_dropped;
@@ -129,7 +130,6 @@ static bool sock_accept_clients(sock_ctx_t *ctx)
 
         if (slot) {
             slot->fd = client_fd;
-            slot->last_size = 0;
             slot->num_frames = 0;
             slot->num_dropped = 0;
             clock_gettime(CLOCK_MONOTONIC, &slot->last_time);
@@ -205,6 +205,36 @@ static ssize_t sock_write_client_fd(int fd, const void *data, size_t size)
     return size;
 }
 
+/* What the reader has not taken yet. An unanswered question reports nothing outstanding, so a
+   frame is offered rather than lost because the kernel would not say. */
+static size_t sock_client_unsent_bytes(int client_fd)
+{
+    int unsent = 0;
+    if (ioctl(client_fd, SIOCOUTQ, &unsent) != 0)
+        return 0;
+    if (unsent < 0)
+        return 0;
+    return (size_t)unsent;
+}
+
+static size_t sock_send_capacity_bytes(int client_fd)
+{
+    int capacity = 0;
+    socklen_t capacity_len = sizeof(capacity);
+    if (getsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &capacity, &capacity_len) != 0)
+        return 0;
+    if (capacity < 0)
+        return 0;
+    return (size_t)capacity;
+}
+
+static bool sock_client_would_be_torn(int client_fd, size_t offered_frame_bytes)
+{
+    return reader_cannot_take_whole_frame(sock_client_unsent_bytes(client_fd),
+                                          sock_send_capacity_bytes(client_fd),
+                                          offered_frame_bytes);
+}
+
 static void sock_close_client(sock_ctx_t *ctx, int i, const char *reason)
 {
     assert(i >= 0 && i < SOCK_MAX_CLIENTS);
@@ -236,14 +266,11 @@ static void sock_write_cb(const void *data, size_t size, void *arg)
             continue;
         }
 
-        if (ctx->allow_drops && client->last_size) {
-            int unsent = 0;
-            if (ioctl(client->fd, SIOCOUTQ, &unsent) == 0) {
-                if ((size_t)unsent >= client->last_size) {
-                    client->num_dropped++;
-                    continue;
-                }
-            }
+        if (ctx->allow_drops && sock_client_would_be_torn(client->fd, size)) {
+            client->num_dropped++;
+            log_printf("Socket %s: dropped a whole frame, the reader is behind (%d dropped)\n",
+                       ctx->path, client->num_dropped);
+            continue;
         }
 
         if (sock_write_client_fd(client->fd, data, size) < 0) {
@@ -255,7 +282,6 @@ static void sock_write_cb(const void *data, size_t size, void *arg)
             continue;
         }
 
-        client->last_size = size;
         client->last_time = now;
         client->num_frames++;
 

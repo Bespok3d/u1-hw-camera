@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.11
+
+- The printer's own video stack, which is what records a timelapse, is now handed a whole picture or
+  none at all. It used to be handed a picture that was a third of the next one stitched onto the end
+  of the one before it, and a picture cut off partway through was passed on as if it were finished,
+  so a frame in a timelapse could be drawn half from one moment and half from another. A picture that
+  cannot be delivered whole is now dropped whole, and the camera carries on with the next one.
+- A camera set to 720p now tells the printer's video stack 720p. It was told 1080p whatever the
+  camera was set to.
+- When the camera does drop a picture, it now says so in a file you can read on the printer:
+  `/userdata/bespok3d/run/capture-mipi-mpp.log` for a picture dropped because something reading the
+  camera fell behind, and `/userdata/bespok3d/run/v4l2-imposter.log` for one that arrived cut off. The
+  camera said nothing anywhere before, so there was no way to tell a busy printer from a broken one.
+
 ## 0.1.10
 
 - A camera tile that is still starting up now says **"Connecting..."** instead of flashing the
