@@ -24,6 +24,7 @@
 #include "callback_chain.h"
 #include "mpp_enc_ctx.h"
 #include "log.h"
+#include "frame_tap_client.h"
 
 const char NAL_AUD_FRAME[] = {0x00, 0x00, 0x00, 0x01, 0x09, 0xf0};
 
@@ -88,6 +89,41 @@ static void write_output_rename_cb(const void *data, size_t size, void *arg)
     }
 }
 
+/* -1 on a failure that ends the capture, 0 when there is no frame this time, 1 with a frame. */
+static int read_v4l2_frame(v4l2_capture_t *v4l2, struct v4l2_buffer *dequeued_buffer, struct v4l2_plane *planes,
+                           void **frame_data, size_t *bytesused)
+{
+    int wait_result = v4l2_capture_wait_for_frame(v4l2, 2000);
+    if (wait_result < 0) {
+        log_perror("select");
+        return -1;
+    }
+    if (wait_result == 0) {
+        log_errorf("Timeout waiting for frame\n");
+        return -1;
+    }
+
+    int dequeue_result = v4l2_capture_read_frame(v4l2, dequeued_buffer, planes);
+    if (dequeue_result <= 0)
+        return dequeue_result;
+
+    *bytesused = (v4l2->buf_type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+        ? planes[0].bytesused : dequeued_buffer->bytesused;
+    *frame_data = v4l2->buffers[dequeued_buffer->index].start[0];
+    return 1;
+}
+
+/* The frame tap hands over packed NV12 at the size the capture was started with, so the capture
+   describes the picture itself instead of asking a device. */
+static int open_frame_tap(frame_tap_client_t *frame_tap, v4l2_capture_t *v4l2, const char *frame_sock,
+                          int width, int height)
+{
+    v4l2->width = width;
+    v4l2->height = height;
+    v4l2->pixfmt = V4L2_PIX_FMT_NV12;
+    return frame_tap_client_open(frame_tap, frame_sock, width, height);
+}
+
 static void print_usage(const char *prog)
 {
     printf("Usage: %s [options]\n", prog);
@@ -103,6 +139,7 @@ static void print_usage(const char *prog)
     printf("  --h264-sock <path>      H264 stream output socket path (optional)\n");
     printf("  --h264-bitrate <kbps>   H264 bitrate in kbps (default: 2000)\n");
     printf("  --raw-frame-sock <path> Raw frame output socket path (optional)\n");
+    printf("  --frame-sock <path>     Take frames from the printer's frame tap instead of a V4L2 device\n");
     printf("  --fps <fps>             Frames per second (default: 30)\n");
     printf("  --num-planes <n>        Number of capture planes (default: 1)\n");
     printf("  --idle <ms>             Idle sleep in ms when no readers (default: 1000)\n");
@@ -121,6 +158,7 @@ int main(int argc, char *argv[])
     const char *mjpeg_stream = NULL;
     const char *h264_stream = NULL;
     const char *raw_frame = NULL;
+    const char *frame_sock = NULL;
     int width = 1920;
     int height = 1080;
     int quality = 80;
@@ -142,6 +180,7 @@ int main(int argc, char *argv[])
         OPT_H264_SOCK,
         OPT_BITRATE,
         OPT_RAW_FRAME_SOCK,
+        OPT_FRAME_SOCK,
         OPT_FPS,
         OPT_NUM_PLANES,
         OPT_IDLE,
@@ -161,6 +200,7 @@ int main(int argc, char *argv[])
         {"h264-sock",      required_argument, 0, OPT_H264_SOCK},
         {"h264-bitrate",   required_argument, 0, OPT_BITRATE},
         {"raw-frame-sock", required_argument, 0, OPT_RAW_FRAME_SOCK},
+        {"frame-sock",     required_argument, 0, OPT_FRAME_SOCK},
         {"fps",            required_argument, 0, OPT_FPS},
         {"num-planes",     required_argument, 0, OPT_NUM_PLANES},
         {"idle",           required_argument, 0, OPT_IDLE},
@@ -204,6 +244,9 @@ int main(int argc, char *argv[])
         case OPT_RAW_FRAME_SOCK:
             raw_frame = optarg;
             break;
+        case OPT_FRAME_SOCK:
+            frame_sock = optarg;
+            break;
         case OPT_FPS:
             fps = atoi(optarg);
             break;
@@ -233,6 +276,7 @@ int main(int argc, char *argv[])
     sock_ctx_t mjpeg_sock = DEFAULT_SOCK_CTX;
     sock_ctx_t h264_sock = DEFAULT_SOCK_CTX;
     sock_ctx_t raw_frame_sock = DEFAULT_SOCK_CTX;
+    frame_tap_client_t frame_tap = { .socket_fd = -1 };
 
     log_printf("Device: %s\n", device);
     log_printf("Resolution: %dx%d\n", width, height);
@@ -242,12 +286,18 @@ int main(int argc, char *argv[])
     if (mjpeg_stream) log_printf("MJPEG stream socket: %s\n", mjpeg_stream);
     if (h264_stream) log_printf("H264 stream socket: %s\n", h264_stream);
     if (raw_frame) log_printf("Raw frame socket: %s\n", raw_frame);
+    if (frame_sock) log_printf("Frame tap socket: %s\n", frame_sock);
     log_printf("FPS: %d\n", fps);
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    if (v4l2_capture_open(&v4l2, device, width, height, pixfmt, fps, num_planes) < 0) {
+    if (frame_sock && open_frame_tap(&frame_tap, &v4l2, frame_sock, width, height) < 0) {
+        log_errorf("Failed to allocate the frame tap picture\n");
+        return 1;
+    }
+
+    if (!frame_sock && v4l2_capture_open(&v4l2, device, width, height, pixfmt, fps, num_planes) < 0) {
         log_errorf( "Failed to open V4L2 device\n");
         return 1;
     }
@@ -291,7 +341,7 @@ int main(int argc, char *argv[])
        at the write timeout with half a picture delivered. */
     raw_frame_sock.allow_drops = true;
 
-    if (v4l2_capture_start(&v4l2) < 0) {
+    if (!frame_sock && v4l2_capture_start(&v4l2) < 0) {
         log_errorf( "Failed to start V4L2 streaming\n");
         goto error;
     }
@@ -308,26 +358,17 @@ int main(int argc, char *argv[])
     int frames_this_h264_captured = 0;
 
     while (running) {
-        int r = v4l2_capture_wait_for_frame(&v4l2, 2000);
-        if (r < 0) {
-            log_perror("select");
-            goto error_stop;
-        } else if (r == 0) {
-            log_errorf("Timeout waiting for frame\n");
-            goto error_stop;
-        }
-
         struct v4l2_buffer buf;
         struct v4l2_plane planes[V4L2_MAX_PLANES];
-        int ret = v4l2_capture_read_frame(&v4l2, &buf, planes);
-        if (ret < 0)
+        void *frame_data = NULL;
+        size_t bytesused = 0;
+        int frame_status = frame_sock
+            ? frame_tap_client_receive(&frame_tap, &frame_data, &bytesused)
+            : read_v4l2_frame(&v4l2, &buf, planes, &frame_data, &bytesused);
+        if (frame_status < 0)
             goto error_stop;
-        if (ret == 0)
+        if (frame_status == 0)
             continue;
-
-        size_t bytesused = (v4l2.buf_type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
-            ? planes[0].bytesused : buf.bytesused;
-        void *frame_data = v4l2.buffers[buf.index].start[0];
 
         sock_accept_clients(&jpeg_sock);
         sock_accept_clients(&mjpeg_sock);
@@ -373,7 +414,8 @@ int main(int argc, char *argv[])
             encoded_any = 1;
         }
 
-        v4l2_capture_release_frame(&v4l2, &buf);
+        if (!frame_sock)
+            v4l2_capture_release_frame(&v4l2, &buf);
 
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -414,6 +456,7 @@ int main(int argc, char *argv[])
     mpp_encoder_close(&mpp_h264);
     mpp_encoder_close(&mpp_jpeg);
     v4l2_capture_close(&v4l2);
+    frame_tap_client_close(&frame_tap);
 
     log_printf("Captured %d frames\n", frames_captured);
     return 0;
@@ -430,5 +473,6 @@ error:
     mpp_encoder_close(&mpp_h264);
     mpp_encoder_close(&mpp_jpeg);
     v4l2_capture_close(&v4l2);
+    frame_tap_client_close(&frame_tap);
     return 1;
 }

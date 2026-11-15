@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.12
+
+- On printer firmware 2.1.0 the printer's own camera works again next to this plugin: its photos,
+  its timelapse, the Snapmaker app and Snorca no longer show a black picture. Firmware 2.1.0 keeps
+  the camera to itself, and this plugin used to take it away. On that firmware the plugin now takes
+  its pictures from the printer's own camera service instead, so both see the camera at once.
+  Firmware 2.0.0 keeps working the way it did.
+- On firmware 2.1.0 the built-in camera always runs at 1080p, the size the printer's own camera
+  service uses, whatever the resolution setting says.
+
 ## 0.1.11
 
 - The printer's own video stack, which is what records a timelapse, is now handed a whole picture or

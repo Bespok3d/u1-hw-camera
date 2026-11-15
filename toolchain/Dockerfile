@@ -34,13 +34,16 @@ RUN make deps
 # layers above stay cached.
 COPY src/v4l2-mpp/apps ./apps
 COPY src/v4l2-mpp/common ./common
+COPY src/log-file-cap /build/log-file-cap
 COPY src/fake-service /build/fake-service
 COPY src/v4l2-imposter /build/v4l2-imposter
+COPY src/mipi-frame-tap /build/mipi-frame-tap
 COPY src/wait-for-frame /build/wait-for-frame
 
 RUN make install DESTDIR=/dist \
     && make -C /build/fake-service install DESTDIR=/dist \
     && make -C /build/v4l2-imposter install DESTDIR=/dist \
+    && make -C /build/mipi-frame-tap install DESTDIR=/dist \
     && make -C /build/wait-for-frame install DESTDIR=/dist
 
 # /out holds exactly the members plugin/manifest.json declares: the bake fails on anything else left here.

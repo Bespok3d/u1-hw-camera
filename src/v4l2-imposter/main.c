@@ -18,6 +18,7 @@
 #include <linux/videodev2.h>
 
 #include "frame_geometry.h"
+#include "../log-file-cap/log_file_cap.h"
 
 /* frame_geometry.h names the pixel formats itself so its arithmetic can be tested without kernel
    headers. These hold those names to the kernel's own values. */
@@ -33,7 +34,6 @@ _Static_assert(FRAME_FORMAT_JPEG == V4L2_PIX_FMT_JPEG, "the JPEG fourcc drifted"
 #define FOURCC_FMT "%c%c%c%c"
 
 #define LOG_PREFIX "[v4l2-mpp-injector] "
-#define LOG_MAX_BYTES (256 * 1024)
 #define LOG_LINE_MAX 512
 
 /* The shim rides inside the printer's own video daemon, which is started in the background with no
@@ -45,19 +45,6 @@ static FILE *log_file = NULL;
 static FILE *log_destination(void)
 {
     return log_file ? log_file : stderr;
-}
-
-/* Emptied rather than rotated: one frame going wrong at thirty frames a second would otherwise
-   fill the printer's flash. A stream that cannot say how long it is, such as stderr, is left be. */
-static void log_empty_when_full(FILE *stream)
-{
-    long bytes_written = ftell(stream);
-
-    if (bytes_written < LOG_MAX_BYTES)
-        return;
-    if (ftruncate(fileno(stream), 0) != 0)
-        return;
-    rewind(stream);
 }
 
 /* The shim runs inside a video daemon that has several threads, so the shared clock that

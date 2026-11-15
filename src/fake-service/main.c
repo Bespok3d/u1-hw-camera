@@ -12,26 +12,13 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <getopt.h>
+
+#include "../log-file-cap/log_file_cap.h"
 #include <libgen.h>
 
 static volatile sig_atomic_t received_signal = 0;
 static volatile pid_t child_pid = 0;
 static bool use_syslog = false;
-
-#define LOG_MAX_BYTES (256 * 1024)
-
-/* Emptied rather than rotated: a camera daemon complaining thirty times a second would otherwise fill
-   the printer's flash. A stream that cannot say how long it is, such as a terminal, is left be. */
-static void log_empty_when_full(FILE *stream)
-{
-    long bytes_written = ftell(stream);
-
-    if (bytes_written < LOG_MAX_BYTES)
-        return;
-    if (ftruncate(fileno(stream), 0) != 0)
-        return;
-    rewind(stream);
-}
 
 /* Both streams are pointed at the same file so the supervisor's own words and the daemon's sit in one
    readable place. A log that cannot be opened is not worth refusing to start the camera over.

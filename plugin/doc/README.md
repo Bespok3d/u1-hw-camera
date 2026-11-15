@@ -45,7 +45,8 @@ Open the plugin's **Config** tab to adjust these:
   otherwise the tile goes blank.
 - **Built-in camera resolution** (default 1080p): the capture resolution for the MIPI camera. 720p
   uses less memory and CPU, handy on low-RAM boards. The USB camera always uses its own native
-  resolution.
+  resolution. On printer firmware 2.1.0 the built-in camera always runs at 1080p, the size the
+  printer's own camera service uses, so this setting has no effect there.
 - **Recycle WebRTC viewers after (minutes)** (default 0 = off): see "Staying connected" below.
 
 ## While a stream is starting

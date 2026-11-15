@@ -136,7 +136,7 @@ def test_a_dropped_or_cut_off_picture_is_written_where_it_can_be_read():
 
 
 def test_the_camera_log_cannot_fill_the_printer(compile_c_source):
-    assert "LOG_MAX_BYTES" in FAKE_SERVICE
+    assert '#include "../log-file-cap/log_file_cap.h"' in FAKE_SERVICE
     assert FAKE_SERVICE.count("log_empty_when_full(std") == 2
     compiled = compile_c_source(FAKE_SERVICE_SOURCE)
     assert compiled.returncode == 0, compiled.stderr

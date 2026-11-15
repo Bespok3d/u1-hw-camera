@@ -23,6 +23,20 @@ case "$CAMERA_RESOLUTION" in
     *)    CAM_WIDTH=1920; CAM_HEIGHT=1080 ;;
 esac
 
+# From firmware 2.1.0 the printer's video service keeps the camera device to itself: while the
+# capture holds it, the service's photos, timelapse and the Snapmaker apps see only black. There the
+# capture takes its frames from a tap inside the service instead, at the service's own 1080p.
+# Firmware 2.1.0 is told apart by the video library its service is built on.
+FRAME_TAP_SOCK=/tmp/capture-mipi-tap.sock
+FRAME_TAP=0
+CAPTURE_SOURCE="--device /dev/video11 --raw-frame-sock /tmp/capture-mipi-raw.sock"
+if grep -q librockit /usr/bin/unisrv 2>/dev/null; then
+    FRAME_TAP=1
+    CAM_WIDTH=1920
+    CAM_HEIGHT=1080
+    CAPTURE_SOURCE="--frame-sock $FRAME_TAP_SOCK"
+fi
+
 # 0 = off (a stream lives as long as it is watched). Otherwise recycle each viewer after N minutes;
 # the tile reconnects on its own, so it is a brief blip, not a freeze. Dead viewers are always reaped.
 WEBRTC_SESSION_TIMEOUT_S=$((WEBRTC_SESSION_TIMEOUT_MIN * 60))
@@ -102,9 +116,44 @@ clear_pidfile_of_dead_process() {
     return 0
 }
 
-CMD_CAPTURE="$BIN/capture-v4l2-raw-mpp --device /dev/video11 --format nv12 --jpeg-quality 7 --jpeg-sock /tmp/capture-mipi-jpeg.sock --mjpeg-sock /tmp/capture-mipi-mjpeg.sock --h264-sock /tmp/capture-mipi-h264.sock --raw-frame-sock /tmp/capture-mipi-raw.sock --width $CAM_WIDTH --height $CAM_HEIGHT --fps 30"
+CMD_CAPTURE="$BIN/capture-v4l2-raw-mpp $CAPTURE_SOURCE --format nv12 --jpeg-quality 7 --jpeg-sock /tmp/capture-mipi-jpeg.sock --mjpeg-sock /tmp/capture-mipi-mjpeg.sock --h264-sock /tmp/capture-mipi-h264.sock --width $CAM_WIDTH --height $CAM_HEIGHT --fps 30"
 
 CMD_WEBRTC="$BIN/stream-webrtc --h264-sock /tmp/capture-mipi-h264.sock --webrtc-sock /tmp/capture-mipi-webrtc.sock --session-timeout-s $WEBRTC_SESSION_TIMEOUT_S"
+
+# The service reads the camera through the shim, which feeds it the capture's frames.
+start_lmd_with_imposter() {
+    (
+        export LD_PRELOAD=$BIN/libv4l2-imposter.so
+        export V4L2_IMPOSTER_SOCKET_PATH=/tmp/capture-mipi-raw.sock
+        export V4L2_IMPOSTER_DEVICE=/dev/video11
+        # The same size the capture is started at. The shim now measures every frame against it and
+        # drops one that arrives short, so a resolution that disagrees with the capture would reject
+        # every frame instead of merely mislabelling them.
+        export V4L2_IMPOSTER_WIDTH=$CAM_WIDTH
+        export V4L2_IMPOSTER_HEIGHT=$CAM_HEIGHT
+        export V4L2_IMPOSTER_FORMAT=nv12
+        # lmd is started in the background with no terminal, so anything the shim writes to stderr is
+        # lost. This is where a dropped or a cut off frame becomes readable on the printer.
+        export V4L2_IMPOSTER_LOG=$RUN/v4l2-imposter.log
+        printf "Starting lmd: "
+        clear_pidfile_of_dead_process "$RUN/unisrv.pid"
+        start-stop-daemon -S -b -q -m -p $RUN/unisrv.pid -x /usr/bin/lmd
+        echo "OK"
+    )
+}
+
+# The service owns the camera, and the tap inside it serves the capture its frames.
+start_lmd_with_frame_tap() {
+    (
+        export LD_PRELOAD=$BIN/libmipi-frame-tap.so
+        export MIPI_FRAME_TAP_SOCK=$FRAME_TAP_SOCK
+        export MIPI_FRAME_TAP_LOG=$RUN/mipi-frame-tap.log
+        printf "Starting lmd: "
+        clear_pidfile_of_dead_process "$RUN/unisrv.pid"
+        start-stop-daemon -S -b -q -m -p $RUN/unisrv.pid -x /usr/bin/lmd
+        echo "OK"
+    )
+}
 
 start() {
     if [ ! -e /dev/video11 ]; then
@@ -117,6 +166,8 @@ start() {
     chown -R lava:lava /userdata/.tmp_timelapse
 
     lmd_stop
+    # The tap only serves once the service has the camera running, so the service goes first.
+    [ "$FRAME_TAP" = "1" ] && start_lmd_with_frame_tap
 
     printf "Starting capture-mipi: "
     # start-stop-daemon -b sends a background service's output to /dev/null, so the capture daemon is
@@ -172,24 +223,7 @@ start() {
         --html-dir $PLUGIN/html
     echo "OK"
 
-    (
-        export LD_PRELOAD=$BIN/libv4l2-imposter.so
-        export V4L2_IMPOSTER_SOCKET_PATH=/tmp/capture-mipi-raw.sock
-        export V4L2_IMPOSTER_DEVICE=/dev/video11
-        # The same size the capture is started at. The shim now measures every frame against it and
-        # drops one that arrives short, so a resolution that disagrees with the capture would reject
-        # every frame instead of merely mislabelling them.
-        export V4L2_IMPOSTER_WIDTH=$CAM_WIDTH
-        export V4L2_IMPOSTER_HEIGHT=$CAM_HEIGHT
-        export V4L2_IMPOSTER_FORMAT=nv12
-        # lmd is started in the background with no terminal, so anything the shim writes to stderr is
-        # lost. This is where a dropped or a cut off frame becomes readable on the printer.
-        export V4L2_IMPOSTER_LOG=$RUN/v4l2-imposter.log
-        printf "Starting lmd: "
-        clear_pidfile_of_dead_process "$RUN/unisrv.pid"
-        start-stop-daemon -S -b -q -m -p $RUN/unisrv.pid -x /usr/bin/lmd
-        echo "OK"
-    )
+    [ "$FRAME_TAP" = "1" ] || start_lmd_with_imposter
 
     lmd_verify_rearm
 }
