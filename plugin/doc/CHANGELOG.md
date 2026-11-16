@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.13
+
+- On printer firmware 2.1.0 a frozen built-in camera now comes back by itself. That firmware can
+  lose its camera and show black until the Snapmaker app is opened. The plugin now notices when the
+  camera sends nothing for 10 seconds and asks the printer for a photo, the same thing the app does,
+  which brings the camera back. While the camera stays frozen it asks again once a minute, up to 5
+  times. A new setting, **Wake a frozen built-in camera**, turns this off; it is on by default.
+
 ## 0.1.12
 
 - On printer firmware 2.1.0 the printer's own camera works again next to this plugin: its photos,

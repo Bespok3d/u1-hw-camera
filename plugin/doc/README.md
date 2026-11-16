@@ -48,6 +48,11 @@ Open the plugin's **Config** tab to adjust these:
   resolution. On printer firmware 2.1.0 the built-in camera always runs at 1080p, the size the
   printer's own camera service uses, so this setting has no effect there.
 - **Recycle WebRTC viewers after (minutes)** (default 0 = off): see "Staying connected" below.
+- **Wake a frozen built-in camera** (default on): printer firmware 2.1.0 only. On that firmware the
+  built-in camera can freeze, and it stays black until the Snapmaker app is opened. With this on,
+  when the camera sends nothing for 10 seconds, the plugin asks the printer for a photo, as the app
+  does, and the camera comes back. While the camera stays frozen it asks again once a minute, up to 5
+  times.
 
 ## While a stream is starting
 

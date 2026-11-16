@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -116,12 +117,12 @@ static int read_v4l2_frame(v4l2_capture_t *v4l2, struct v4l2_buffer *dequeued_bu
 /* The frame tap hands over packed NV12 at the size the capture was started with, so the capture
    describes the picture itself instead of asking a device. */
 static int open_frame_tap(frame_tap_client_t *frame_tap, v4l2_capture_t *v4l2, const char *frame_sock,
-                          int width, int height)
+                          int width, int height, bool wakes_frozen_camera)
 {
     v4l2->width = width;
     v4l2->height = height;
     v4l2->pixfmt = V4L2_PIX_FMT_NV12;
-    return frame_tap_client_open(frame_tap, frame_sock, width, height);
+    return frame_tap_client_open(frame_tap, frame_sock, width, height, wakes_frozen_camera);
 }
 
 static void print_usage(const char *prog)
@@ -140,6 +141,7 @@ static void print_usage(const char *prog)
     printf("  --h264-bitrate <kbps>   H264 bitrate in kbps (default: 2000)\n");
     printf("  --raw-frame-sock <path> Raw frame output socket path (optional)\n");
     printf("  --frame-sock <path>     Take frames from the printer's frame tap instead of a V4L2 device\n");
+    printf("  --wake-frozen-camera    With --frame-sock, ask the printer for a photo when its camera goes silent\n");
     printf("  --fps <fps>             Frames per second (default: 30)\n");
     printf("  --num-planes <n>        Number of capture planes (default: 1)\n");
     printf("  --idle <ms>             Idle sleep in ms when no readers (default: 1000)\n");
@@ -159,6 +161,7 @@ int main(int argc, char *argv[])
     const char *h264_stream = NULL;
     const char *raw_frame = NULL;
     const char *frame_sock = NULL;
+    bool wakes_frozen_camera = false;
     int width = 1920;
     int height = 1080;
     int quality = 80;
@@ -181,6 +184,7 @@ int main(int argc, char *argv[])
         OPT_BITRATE,
         OPT_RAW_FRAME_SOCK,
         OPT_FRAME_SOCK,
+        OPT_WAKE_FROZEN_CAMERA,
         OPT_FPS,
         OPT_NUM_PLANES,
         OPT_IDLE,
@@ -201,6 +205,7 @@ int main(int argc, char *argv[])
         {"h264-bitrate",   required_argument, 0, OPT_BITRATE},
         {"raw-frame-sock", required_argument, 0, OPT_RAW_FRAME_SOCK},
         {"frame-sock",     required_argument, 0, OPT_FRAME_SOCK},
+        {"wake-frozen-camera", no_argument,   0, OPT_WAKE_FROZEN_CAMERA},
         {"fps",            required_argument, 0, OPT_FPS},
         {"num-planes",     required_argument, 0, OPT_NUM_PLANES},
         {"idle",           required_argument, 0, OPT_IDLE},
@@ -247,6 +252,9 @@ int main(int argc, char *argv[])
         case OPT_FRAME_SOCK:
             frame_sock = optarg;
             break;
+        case OPT_WAKE_FROZEN_CAMERA:
+            wakes_frozen_camera = true;
+            break;
         case OPT_FPS:
             fps = atoi(optarg);
             break;
@@ -276,7 +284,7 @@ int main(int argc, char *argv[])
     sock_ctx_t mjpeg_sock = DEFAULT_SOCK_CTX;
     sock_ctx_t h264_sock = DEFAULT_SOCK_CTX;
     sock_ctx_t raw_frame_sock = DEFAULT_SOCK_CTX;
-    frame_tap_client_t frame_tap = { .socket_fd = -1 };
+    frame_tap_client_t frame_tap = FRAME_TAP_CLIENT_CLOSED;
 
     log_printf("Device: %s\n", device);
     log_printf("Resolution: %dx%d\n", width, height);
@@ -287,12 +295,13 @@ int main(int argc, char *argv[])
     if (h264_stream) log_printf("H264 stream socket: %s\n", h264_stream);
     if (raw_frame) log_printf("Raw frame socket: %s\n", raw_frame);
     if (frame_sock) log_printf("Frame tap socket: %s\n", frame_sock);
+    if (frame_sock && wakes_frozen_camera) log_printf("Frame tap: a frozen camera is woken with a photo\n");
     log_printf("FPS: %d\n", fps);
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    if (frame_sock && open_frame_tap(&frame_tap, &v4l2, frame_sock, width, height) < 0) {
+    if (frame_sock && open_frame_tap(&frame_tap, &v4l2, frame_sock, width, height, wakes_frozen_camera) < 0) {
         log_errorf("Failed to allocate the frame tap picture\n");
         return 1;
     }

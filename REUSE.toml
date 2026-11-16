@@ -54,13 +54,15 @@ SPDX-License-Identifier = "GPL-3.0-only"
 
 # These headers are ours, not v4l2-mpp's. frame_backlog.h is the whole-frame drop rule, placed next to
 # the socket code that asks it the question; the two frame_tap headers are the capture's end of the
-# frame tap, placed next to the capture code that includes them. Another last block, same reason as
-# above.
+# frame tap, freeze_recovery.h is when that end asks a frozen camera to wake and camera_photo_request.h
+# is how it asks, all placed next to the capture code that includes them. Another last block, same reason as above.
 [[annotations]]
 path = [
+  "src/v4l2-mpp/common/capture-common/camera_photo_request.h",
   "src/v4l2-mpp/common/capture-common/frame_backlog.h",
   "src/v4l2-mpp/common/capture-common/frame_tap_client.h",
   "src/v4l2-mpp/common/capture-common/frame_tap_wire.h",
+  "src/v4l2-mpp/common/capture-common/freeze_recovery.h",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (C) 2026 unlucio and the Bespok3d contributors"

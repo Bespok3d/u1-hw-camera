@@ -16,6 +16,7 @@ LMDCTL=$BESPOK3D/etc/init.d/lmdctl
 WEBRTC_ENABLED=1
 CAMERA_RESOLUTION=1080p
 WEBRTC_SESSION_TIMEOUT_MIN=0
+CAMERA_FREEZE_RECOVERY=1
 [ -f "$PLUGIN/camera.conf" ] && . "$PLUGIN/camera.conf"
 
 case "$CAMERA_RESOLUTION" in
@@ -35,6 +36,11 @@ if grep -q librockit /usr/bin/unisrv 2>/dev/null; then
     CAM_WIDTH=1920
     CAM_HEIGHT=1080
     CAPTURE_SOURCE="--frame-sock $FRAME_TAP_SOCK"
+fi
+# The service on that firmware can lose its camera and not notice until it is asked for a photo;
+# the capture can ask for one itself when the tap's camera goes silent.
+if [ "$FRAME_TAP" = "1" ] && [ "$CAMERA_FREEZE_RECOVERY" = "1" ]; then
+    CAPTURE_SOURCE="$CAPTURE_SOURCE --wake-frozen-camera"
 fi
 
 # 0 = off (a stream lives as long as it is watched). Otherwise recycle each viewer after N minutes;

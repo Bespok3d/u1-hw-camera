@@ -1,7 +1,7 @@
 {
   "name": "camera-hw-accel",
   "title": "Camera HW Accel",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "license": "https://github.com/Bespok3d/u1-hw-camera/blob/main/plugin/doc/LICENSE",
   "author": "bespoked",
   "description": "Tap into the SoC's video pipeline instead of CPU-encoding every frame. MJPEG over HTTP at /webcam, WebRTC at /webrtc; works on any browser, smooth 30fps even with two cameras attached.\n\nTo have these auto-registered as cameras in Fluidd and Mainsail (so you don't have to add them by hand under Settings → Cameras), also install [webcam-builtin](b3d://bespok3d/webcam-builtin) for the built-in MIPI camera and [webcam-usb](b3d://bespok3d/webcam-usb) for the external USB camera.",
@@ -11,7 +11,7 @@
   "printer_specific": true,
   "changelog": "doc/CHANGELOG.md",
   "published_at": "2025-08-14",
-  "updated_at": "2026-11-15",
+  "updated_at": "2026-11-16",
   "source": "https://github.com/Bespok3d/u1-hw-camera",
   "publisher": "PLACEHOLDER",
   "provides": [
@@ -60,6 +60,16 @@
       "type": "number",
       "default": "0",
       "hint": "0 (recommended): a camera stays connected as long as you watch it. Set a number of minutes to periodically recycle each WebRTC viewer connection as a memory-safety backstop on a very constrained board; the tile reconnects on its own within a couple of seconds, so it no longer freezes. Dead or abandoned viewers are always cleaned up regardless of this setting.",
+      "userEditable": true
+    },
+    {
+      "key": "CAMERA_FREEZE_RECOVERY",
+      "label": "Wake a frozen built-in camera",
+      "type": "toggle",
+      "onValue": "1",
+      "offValue": "0",
+      "default": "1",
+      "hint": "Printer firmware 2.1.0 only. On that firmware the built-in camera can freeze, and it stays black until the Snapmaker app is opened. On: when the camera sends nothing for 10 seconds, the plugin asks the printer for a photo, as the app does, and the camera comes back; it asks again once a minute, up to 5 times. Off: a frozen camera stays black until the app is opened or the printer restarts.",
       "userEditable": true
     }
   ],
