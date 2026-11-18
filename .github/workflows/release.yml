@@ -61,6 +61,9 @@ jobs:
           # secret every repo inherits when the repos go public. See b3-builder README (secrets model).
           signing-key: ${{ secrets.REGISTRY_SIGNING_KEY }}
           bake: 'true'
+          # The bake builds the binaries from the repo root (toolchain/Dockerfile copies from src/), so
+          # the staged package tree needs those dirs beside the plugin; the default stages the plugin only.
+          stage-command: mkdir -p dist/package && cp -R plugin toolchain src .dockerignore dist/package/
           atom-repo: ${{ github.repository }}
 
       - uses: Bespok3d/main-index/.github/actions/register-atoms@df4eec856264bebffaa37d93ab1c51363fd6ef92
